@@ -13,6 +13,14 @@ const getDraftNews = async (req, res) => {
   res.json(drafts);
 };
 
+const getNewsDetail = async (req, res) => {
+  const news = await News.findById(req.params.id).populate('comments.user', 'name role');
+  if (!news) {
+    return res.status(404).json({ message: 'News not found' });
+  }
+  res.json(news);
+};
+
 const publishNews = async (req, res) => {
   const news = await News.findById(req.params.id);
   if (!news) {
@@ -71,6 +79,7 @@ const generateNews = async (req, res) => {
 module.exports = {
   getPublishedNews,
   getDraftNews,
+  getNewsDetail,
   publishNews,
   addComment,
   deleteNews,

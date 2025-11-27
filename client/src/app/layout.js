@@ -2,13 +2,13 @@ import Link from 'next/link';
 import './globals.css';
 
 const navLinks = [
-  { label: 'Home', href: '/' },
-  { label: 'India', href: '/?section=india' },
-  { label: 'World', href: '/?section=world' },
-  { label: 'Cities', href: '/?section=cities' },
-  { label: 'Opinion', href: '/?section=opinion' },
-  { label: 'Sports', href: '/?section=sports' },
-  { label: 'Tech', href: '/?section=tech' },
+  { label: 'Home', href: '/#home' },
+  { label: 'Trending', href: '/#trending' },
+  { label: 'World', href: '/#world' },
+  { label: 'Politics', href: '/#politics' },
+  { label: 'Sports', href: '/#sports' },
+  { label: 'Tech', href: '/#tech' },
+  { label: 'Business', href: '/#business' },
 ];
 
 const tickerHeadlines = [
@@ -38,7 +38,6 @@ export default function RootLayout({ children }) {
             </div>
             <div className="observer-actions">
               <button type="button" className="observer-action">Search</button>
-              <Link className="observer-action" href="/epaper">E-Paper</Link>
               <Link className="observer-action" href="/admin/login">Sign In</Link>
             </div>
           </div>

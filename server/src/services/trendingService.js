@@ -2,23 +2,127 @@ const axios = require('axios');
 const cron = require('node-cron');
 const { getJson } = require('serpapi');
 const News = require('../models/News');
+const SystemStatus = require('../models/SystemStatus');
 
 const GEMINI_MODEL = 'gemini-1.5-flash-latest';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
+const SUMMARY_MIN_WORDS = 100;
+const SUMMARY_MAX_WORDS = 140;
 
-const serpRequest = (params) => {
+const CATEGORY_FEEDS = [
+  {
+    id: 'world',
+    topic: 'World Watch Briefing',
+    query: 'India world diplomacy news',
+    category: 'World',
+    tags: ['world', 'global'],
+  },
+  {
+    id: 'politics',
+    topic: 'Capital Circuit',
+    query: 'Indian politics parliament policy',
+    category: 'Politics',
+    tags: ['politics', 'policy'],
+  },
+  {
+    id: 'sports',
+    topic: 'Sports Pulse',
+    query: 'India sports headline',
+    category: 'Sports',
+    tags: ['sports'],
+  },
+  {
+    id: 'tech',
+    topic: 'Tech Radar',
+    query: 'India technology startups',
+    category: 'Tech',
+    tags: ['tech', 'innovation'],
+  },
+  {
+    id: 'business',
+    topic: 'Boardroom Briefing',
+    query: 'India business markets economy',
+    category: 'Business',
+    tags: ['business', 'markets'],
+  },
+];
+
+const INGESTION_STATUS_KEY = 'ingestion';
+
+const updateStatus = async (changes) => {
+  try {
+    await SystemStatus.findOneAndUpdate(
+      { key: INGESTION_STATUS_KEY },
+      { $set: changes },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  } catch (error) {
+    console.error('Failed to persist ingestion status', error.message);
+  }
+};
+
+const normalizeSummaryLength = (text, articleOptions = []) => {
+  const sanitize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+  const wordsFrom = (value) => sanitize(value).split(' ').filter(Boolean);
+
+  const baseWords = wordsFrom(text);
+  const fallbackText = Array.isArray(articleOptions)
+    ? articleOptions.map((article) => article.snippet || article.title || '').join(' ')
+    : '';
+  const fallbackWords = wordsFrom(fallbackText);
+
+  let words = baseWords.length ? [...baseWords] : [...fallbackWords];
+  if (!words.length) {
+    return 'Summary unavailable.';
+  }
+
+  if (words.length > SUMMARY_MAX_WORDS) {
+    words = words.slice(0, SUMMARY_MAX_WORDS);
+  } else if (words.length < SUMMARY_MIN_WORDS) {
+    const extender = fallbackWords.length ? fallbackWords : words;
+    let idx = 0;
+    while (words.length < SUMMARY_MIN_WORDS && extender.length) {
+      words.push(extender[idx % extender.length]);
+      idx += 1;
+      if (idx > SUMMARY_MAX_WORDS * 2) {
+        break;
+      }
+    }
+    if (words.length > SUMMARY_MAX_WORDS) {
+      words = words.slice(0, SUMMARY_MAX_WORDS);
+    }
+  }
+
+  return words.join(' ');
+};
+
+const serpRequest = async (params) => {
   if (!process.env.SERPAPI_KEY) {
     throw new Error('SERPAPI_KEY missing');
   }
 
-  return new Promise((resolve, reject) => {
-    getJson({ api_key: process.env.SERPAPI_KEY, ...params }, (json) => {
-      if (json.error) {
-        return reject(new Error(json.error));
-      }
-      resolve(json);
+  const requestPayload = { api_key: process.env.SERPAPI_KEY, ...params };
+
+  try {
+    const response = await new Promise((resolve, reject) => {
+      getJson(requestPayload, (json) => {
+        if (!json) {
+          return reject(new Error('Empty response from SerpAPI'));
+        }
+        if (json.error) {
+          return reject(new Error(json.error));
+        }
+        resolve(json);
+      });
     });
-  });
+    return response;
+  } catch (error) {
+    const meta = `engine=${params.engine || 'unknown'} q=${params.q || params.topic_token || ''}`.trim();
+    const message = error.message || 'SerpAPI request failed';
+    const enriched = new Error(`SerpAPI: ${message}${meta ? ` (${meta})` : ''}`);
+    enriched.cause = error;
+    throw enriched;
+  }
 };
 
 const fetchTrendingTopics = async () => {
@@ -72,6 +176,38 @@ const fetchTopicArticles = async (topic, limit = 6) => {
     .filter((article) => Boolean(article.link));
 };
 
+const fetchCategoryArticles = async (feed, limit = 8) => {
+  const params = {
+    engine: 'google_news',
+    hl: feed.lang || 'en',
+    gl: feed.country || 'in',
+  };
+
+  if (feed.query) params.q = feed.query;
+  if (feed.topicToken) params.topic_token = feed.topicToken;
+  if (feed.sectionToken) params.section_token = feed.sectionToken;
+  params.num = limit;
+
+  const response = await serpRequest(params);
+  const newsResults = response.news_results || response.articles_results || [];
+  return newsResults
+    .map((item) => {
+      const source =
+        typeof item.source === 'string'
+          ? item.source
+          : item.source?.name || item.publisher?.name || null;
+      return {
+        source,
+        title: item.title || item.heading || feed.topic,
+        snippet: item.snippet || item.summary || '',
+        link: item.link || item.url || item.news_url || null,
+        imageUrl: item.image?.src || item.image || item.thumbnail || null,
+        publishedAt: item.date || item.published_at || null,
+      };
+    })
+    .filter((article) => Boolean(article.link));
+};
+
 const callGemini = async (prompt) => {
   if (!process.env.GOOGLE_API_KEY) {
     throw new Error('GOOGLE_API_KEY missing');
@@ -89,14 +225,19 @@ const summarizeWithGemini = async (topic, trendData) => {
   const trendSlice = JSON.stringify(trendData?.interest_over_time || []).slice(0, 6000);
 
   const prompt = [
-    'Create a crisp, factual news brief (max 80 words) for the following trending Indian topic.',
+    'Create a crisp, factual news brief (aim for 100-140 words, roughly 10-12 lines) for the following trending Indian topic.',
     `Topic: ${topic}`,
     `Trend data: ${trendSlice}`,
     'Highlight why it matters and avoid speculation.',
   ].join('\n');
 
-  const responseText = await callGemini(prompt);
-  return responseText || 'Summary unavailable.';
+  try {
+    const responseText = await callGemini(prompt);
+    return responseText || 'Summary unavailable.';
+  } catch (error) {
+    console.error('Gemini trend summary failed', error.message);
+    return 'Summary unavailable.';
+  }
 };
 
 const summarizeArticlesWithGemini = async (topic, articles) => {
@@ -132,45 +273,121 @@ Link: ${article.link || 'N/A'}`;
     }
 
     const parsed = JSON.parse(jsonMatch[0]);
+    const normalizedSummary = normalizeSummaryLength(parsed.summary || parsed.content, articles);
     return {
       title: parsed.title || topic,
       content: parsed.content || parsed.summary || 'Content unavailable.',
-      summary: parsed.summary || parsed.content?.slice(0, 200) || 'Summary unavailable.',
+      summary: normalizedSummary,
       category: parsed.category || 'General',
       tags: Array.isArray(parsed.tags) ? parsed.tags : [],
     };
   } catch (error) {
     console.error('Gemini article synthesis failed:', error.message);
+    const fallbackSummary = `Highlights for ${topic}: ${articles
+      .slice(0, 2)
+      .map((article) => article.snippet || article.title)
+      .join(' / ')}`;
     return {
       title: `Trending: ${topic}`,
       content: articles.map((article, idx) => `${idx + 1}. ${article.title} - ${article.snippet || ''}`).join('\n'),
-      summary: `Highlights for ${topic}: ${articles
-        .slice(0, 2)
-        .map((article) => article.snippet || article.title)
-        .join(' / ')}`,
+      summary: normalizeSummaryLength(fallbackSummary, articles),
       category: 'General',
       tags: [topic.toLowerCase().replace(/\s+/g, '-'), 'trending'],
     };
   }
 };
 
+const ingestCategoryFeeds = async (issues) => {
+  const categoryRecords = [];
+
+  for (const feed of CATEGORY_FEEDS) {
+    try {
+      const articles = await fetchCategoryArticles(feed).catch((error) => {
+        throw new Error(error.message || 'Category fetch failed');
+      });
+      if (!articles.length) {
+        const warning = `No Google News articles returned for ${feed.id}`;
+        console.warn(warning);
+        issues.push(warning);
+        continue;
+      }
+
+      const summary = await summarizeArticlesWithGemini(feed.topic, articles);
+      const availableSources = Array.from(
+        new Set(articles.map((article) => article.source).filter(Boolean))
+      );
+      const firstArticle = articles[0] || {};
+
+      const record = await News.findOneAndUpdate(
+        { topic: feed.topic },
+        {
+          $set: {
+            topic: feed.topic,
+            title: summary.title || feed.topic,
+            summary: summary.summary,
+            content: summary.content,
+            category: feed.category,
+            tags: summary.tags.length ? summary.tags : feed.tags,
+            sourceOptions: articles,
+            availableSources,
+            selectedSource: availableSources[0] || null,
+            primarySource: firstArticle.source || null,
+            primaryLink: firstArticle.link || null,
+            externalUrl: firstArticle.link || null,
+            imageUrl: firstArticle.imageUrl || null,
+            generatedAt: new Date(),
+            isTrending: false,
+            autoGenerated: true,
+            fromNewsApi: true,
+            status: 'published',
+            publishedAt: new Date(),
+          },
+          $setOnInsert: {
+            interestOverTime: [],
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+
+      categoryRecords.push(record);
+    } catch (error) {
+      const message = `Category feed ${feed.id} failed: ${error.message}`;
+      console.error(message);
+      issues.push(message);
+    }
+  }
+
+  return categoryRecords;
+};
+
 const runTrendingIngestion = async () => {
+  const startedAt = new Date();
+  await updateStatus({
+    lastRunAt: startedAt,
+    lastRunStatus: 'running',
+    summary: 'Starting ingestion pipeline…',
+    issues: [],
+  });
+
   const topics = await fetchTrendingTopics();
+  const results = [];
+  const issues = [];
+  let trendingCount = 0;
+
   if (!topics.length) {
     console.warn('No trending topics returned from SerpAPI.');
-    return [];
   }
-  const results = [];
 
   for (const topic of topics) {
     try {
       const insights = await fetchTopicInsights(topic).catch(() => null);
-      const articles = await fetchTopicArticles(topic).catch(() => []);
+      const articles = await fetchTopicArticles(topic);
       const summary = await summarizeWithGemini(topic, insights);
       const availableSources = Array.from(
         new Set(articles.map((article) => article.source).filter(Boolean))
       );
       const firstArticle = articles[0] || {};
+      const normalizedSummary = normalizeSummaryLength(summary, articles);
 
       const record = await News.findOneAndUpdate(
         { topic },
@@ -178,8 +395,8 @@ const runTrendingIngestion = async () => {
           $set: {
             topic,
             title: topic,
-            summary,
-            interestOverTime: insights.interest_over_time || [],
+            summary: normalizedSummary,
+            interestOverTime: insights?.interest_over_time || [],
             isTrending: true,
             generatedAt: new Date(),
             sourceOptions: articles,
@@ -199,11 +416,32 @@ const runTrendingIngestion = async () => {
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
+      trendingCount += 1;
       results.push(record);
     } catch (error) {
-      console.error('Failed to process topic', topic, error.message);
+      const message = `Failed to process topic "${topic}": ${error.message}`;
+      console.error(message);
+      issues.push(message);
     }
   }
+
+  const categoryRecords = await ingestCategoryFeeds(issues);
+  results.push(...categoryRecords);
+  const counters = { trending: trendingCount, categories: categoryRecords.length };
+  const overallStatus =
+    issues.length === 0
+      ? 'success'
+      : counters.trending + counters.categories > 0
+      ? 'partial'
+      : 'failed';
+
+  await updateStatus({
+    lastRunFinishedAt: new Date(),
+    lastRunStatus: overallStatus,
+    summary: `Trending: ${counters.trending}, Categories: ${counters.categories}`,
+    issues: issues.slice(-8),
+    counters,
+  });
 
   return results;
 };
@@ -258,7 +496,7 @@ const generateNewsFromTopic = async ({ topic, autoPublish = false, authorId = nu
   const record = await News.create({
     topic,
     title: articleData.title || topic,
-    summary: articleData.summary || articles[0].snippet || 'Summary unavailable.',
+    summary: articleData.summary || normalizeSummaryLength(articles[0]?.snippet, articles),
     content: articleData.content,
     category: articleData.category,
     tags: articleData.tags,
@@ -281,5 +519,10 @@ const generateNewsFromTopic = async ({ topic, autoPublish = false, authorId = nu
   return record;
 };
 
-module.exports = { runTrendingIngestion, scheduleAutoTrendingRefresh, generateNewsFromTopic };
+module.exports = {
+  runTrendingIngestion,
+  scheduleAutoTrendingRefresh,
+  generateNewsFromTopic,
+  normalizeSummaryLength,
+};
 

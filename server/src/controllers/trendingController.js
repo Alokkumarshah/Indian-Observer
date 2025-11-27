@@ -1,10 +1,12 @@
 const News = require('../models/News');
+const SystemStatus = require('../models/SystemStatus');
 const { runTrendingIngestion } = require('../services/trendingService');
 
 const forceRefreshTrending = async (req, res) => {
   try {
     const results = await runTrendingIngestion();
-    res.json({ refreshed: results.length, items: results });
+    const status = await SystemStatus.findOne({ key: 'ingestion' }).lean();
+    res.json({ refreshed: results.length, items: results, status });
   } catch (error) {
     res.status(500).json({ message: 'Trending refresh failed', error: error.message });
   }
@@ -15,5 +17,13 @@ const listTrending = async (req, res) => {
   res.json(news);
 };
 
-module.exports = { forceRefreshTrending, listTrending };
+const getTrendingStatus = async (req, res) => {
+  const status =
+    (await SystemStatus.findOne({ key: 'ingestion' }).lean()) || {
+      lastRunStatus: 'idle',
+    };
+  res.json(status);
+};
+
+module.exports = { forceRefreshTrending, listTrending, getTrendingStatus };
 

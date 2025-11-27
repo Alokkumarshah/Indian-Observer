@@ -2,6 +2,7 @@ const router = require('express').Router();
 const {
   getPublishedNews,
   getDraftNews,
+  getNewsDetail,
   publishNews,
   addComment,
   deleteNews,
@@ -12,6 +13,7 @@ const { requireAuth } = require('../middleware/auth');
 router.get('/', getPublishedNews);
 router.get('/drafts', requireAuth('admin'), getDraftNews);
 router.post('/generate', requireAuth('admin'), generateNews);
+router.get('/:id', getNewsDetail);
 router.patch('/:id/publish', requireAuth('admin'), publishNews);
 router.delete('/:id', requireAuth('admin'), deleteNews);
 router.post('/:id/comments', requireAuth(), addComment);

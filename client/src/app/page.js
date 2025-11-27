@@ -1,9 +1,10 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import NewsCard from '@/components/NewsCard';
 import useAuth from '@/hooks/useAuth';
-import { addComment, getPublishedNews, getTrendingNews } from '@/lib/api';
+import { addComment, getPublishedNews, getTrendingNews, getTrendingStatus } from '@/lib/api';
 
 const placeholderHero = {
   topic: 'Budget 2025: What The Indian Observer Analysis Reveals',
@@ -67,22 +68,115 @@ const placeholderTrending = [
   },
 ];
 
+const STALE_THRESHOLD_MS = 1000 * 60 * 60 * 6;
+
+const SECTION_DEFINITIONS = [
+  {
+    id: 'world',
+    label: 'World',
+    title: 'World Watch',
+    subtitle: 'Global flashpoints that shape India’s next moves.',
+    category: 'World',
+    placeholders: [
+      {
+        topic: 'BRICS expansion redraws trade corridors',
+        summary: 'Energy alliances and local currency trade experiments accelerate as new members formalize entry terms.',
+      },
+      {
+        topic: 'Climate financing pact nears breakthrough',
+        summary: 'Island states push a loss-and-damage facility with blended finance from the G20 and development banks.',
+      },
+    ],
+  },
+  {
+    id: 'politics',
+    label: 'Politics',
+    title: 'Capital Circuit',
+    subtitle: 'Policy maneuvers, campaign trails, and parliamentary math.',
+    category: 'Politics',
+    placeholders: [
+      {
+        topic: 'Winter session agenda leaked ahead of schedule',
+        summary: 'Electoral bonds overhaul, MSP bill, and digital competition draft dominate party whips’ briefing.',
+      },
+      {
+        topic: 'States seek GST compensation extension once more',
+        summary: 'A united front of finance ministers wants a three-year glide path to taper deficit grants.',
+      },
+    ],
+  },
+  {
+    id: 'sports',
+    label: 'Sports',
+    title: 'The Sporting Edge',
+    subtitle: 'Training tables, squad rebuilds, and clutch finishes.',
+    category: 'Sports',
+    placeholders: [
+      {
+        topic: 'Hockey federation unveils Paris roadmap',
+        summary: 'High-altitude camp in Himachal blends European pressing drills with set-piece reinvention.',
+      },
+      {
+        topic: 'Cricket board fast-tracks pace academy',
+        summary: 'Biomechanics lab near Bengaluru will monitor workloads across IPL and Ranji schedules.',
+      },
+    ],
+  },
+  {
+    id: 'tech',
+    label: 'Tech',
+    title: 'Next-Gen Tech',
+    subtitle: 'Deep dives into semiconductors, AI policy, and startup momentum.',
+    category: 'Tech',
+    placeholders: [
+      {
+        topic: 'Chip mission clears second fab cluster',
+        summary: 'PLI tranche two incentives draw Taiwanese packaging majors to Maharashtra’s coastal belt.',
+      },
+      {
+        topic: 'AI Safety Board drafts voluntary guardrails',
+        summary: 'Model watermarking and bias stress tests will accompany any public-sector deployments.',
+      },
+    ],
+  },
+  {
+    id: 'business',
+    label: 'Business',
+    title: 'Boardroom Briefing',
+    subtitle: 'Earnings resets, deals, and macro cues for Indian companies.',
+    category: 'Business',
+    placeholders: [
+      {
+        topic: 'Banking mergers move into final approvals',
+        summary: 'Twin PSU banks inch closer to integration as RBI greenlights IT stack harmonization.',
+      },
+      {
+        topic: 'Domestic airlines lock record aircraft leases',
+        summary: 'Fuel hedging gains and inbound tourist surge underpin aggressive capacity expansion.',
+      },
+    ],
+  },
+];
+
 export default function Home() {
   const { user, loading } = useAuth();
   const [items, setItems] = useState([]);
   const [trendingItems, setTrendingItems] = useState([]);
+  const [ingestionStatus, setIngestionStatus] = useState(null);
   const [commentDrafts, setCommentDrafts] = useState({});
   const [submitting, setSubmitting] = useState(false);
   const [activeFilter, setActiveFilter] = useState('All');
   const [visibleCount, setVisibleCount] = useState(6);
 
   const loadNews = async () => {
-    const [{ data: published }, { data: trending }] = await Promise.all([
+    const [{ data: published }, { data: trending }, statusResponse] = await Promise.all([
       getPublishedNews(),
       getTrendingNews(),
+      getTrendingStatus().catch(() => ({ data: null })),
     ]);
     setItems(published);
     setTrendingItems(trending);
+    setIngestionStatus(statusResponse?.data || null);
   };
 
   useEffect(() => {
@@ -138,7 +232,8 @@ export default function Home() {
   const briefs = useMemo(() => {
     if (items.length === 0) return placeholderBriefs;
     return items.slice(0, 6).map((item) => ({
-      category: item.category || (item.tags?.[0] || 'Latest'),
+      id: item._id,
+      category: item.category || item.tags?.[0] || 'Latest',
       headline: item.title || item.topic,
     }));
   }, [items]);
@@ -230,6 +325,21 @@ export default function Home() {
   };
 
   const trendingFeed = trendingItems.length ? trendingItems : placeholderTrending;
+  const lastRefresh =
+    ingestionStatus?.lastRunFinishedAt && new Date(ingestionStatus.lastRunFinishedAt);
+  const isStale =
+    lastRefresh && Date.now() - lastRefresh.getTime() > STALE_THRESHOLD_MS;
+
+  const topicalSections = useMemo(
+    () =>
+      SECTION_DEFINITIONS.map((section) => {
+        const stories = contentPool.filter(
+          (story) => getStoryCategory(story).toLowerCase() === section.category.toLowerCase()
+        );
+        return { ...section, stories };
+      }),
+    [contentPool]
+  );
 
   const renderSourceList = (story) => {
     if (!story.sourceOptions?.length) return null;
@@ -250,7 +360,8 @@ export default function Home() {
   };
 
   return (
-    <section>
+    <>
+      <section id="home">
       <div className="observer-section-heading">
         <p>SECTION 01</p>
         <div>
@@ -262,12 +373,25 @@ export default function Home() {
       <div className="observer-grid">
         <aside className="observer-briefs">
           <p className="observer-section-title">TOP BRIEFS</p>
-          {briefs.map((brief, idx) => (
-            <div key={`${brief.headline}-${idx}`} className="observer-brief">
-              <small>{brief.category.toUpperCase()}</small>
-              <p>{brief.headline}</p>
-            </div>
-          ))}
+          {briefs.map((brief, idx) => {
+            const content = (
+              <>
+                <small>{brief.category.toUpperCase()}</small>
+                <p>{brief.headline}</p>
+              </>
+            );
+            return (
+              <div key={`${brief.headline}-${idx}`} className="observer-brief">
+                {brief.id ? (
+                  <Link href={`/story/${brief.id}`} className="observer-brief__link">
+                    {content}
+                  </Link>
+                ) : (
+                  content
+                )}
+              </div>
+            );
+          })}
         </aside>
 
         <div>
@@ -282,7 +406,10 @@ export default function Home() {
             <p className="observer-hero__summary">{heroStory.summary}</p>
 
             {heroStory._id && (
-              <div style={{ marginTop: '0.5rem' }}>
+              <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <Link href={`/story/${heroStory._id}`} className="btn">
+                  Read Observer summary
+                </Link>
                 {renderCommentComposer(heroStory)}
               </div>
             )}
@@ -291,7 +418,13 @@ export default function Home() {
           <div className="observer-subgrid">
             {subStories.map((story, idx) => (
               <div key={`${story.topic}-${idx}`} className="observer-substory">
-                <h3>{story.title || story.topic}</h3>
+                {story._id ? (
+                  <Link href={`/story/${story._id}`}>
+                    <h3>{story.title || story.topic}</h3>
+                  </Link>
+                ) : (
+                  <h3>{story.title || story.topic}</h3>
+                )}
                 <p>{story.summary}</p>
               </div>
             ))}
@@ -383,32 +516,109 @@ export default function Home() {
         )}
       </div>
 
-      <div className="observer-section-heading" style={{ marginTop: '4rem' }}>
-        <p>SECTION 02</p>
-        <div>
-          <h2>Trending News Pipeline</h2>
-          <small>Live topics synthesized from SERP trends + Gemini narrative.</small>
-        </div>
-      </div>
+      </section>
 
-      <div className="observer-trending">
-        {trendingFeed.map((trend, idx) => (
-          <article key={trend._id || trend.topic || idx} className="observer-trending__card">
-            <header>
-              <span>Trend #{String(idx + 1).padStart(2, '0')}</span>
-              <time>{getTimestamp(trend)}</time>
-            </header>
-            <h3>{trend.title || trend.topic}</h3>
-            <p>{trend.summary}</p>
-            {renderSourceList(trend)}
-          </article>
-        ))}
-        {trendingItems.length === 0 && (
-          <p className="observer-trending__empty">
-            Trending feed will populate automatically once the pipeline runs.
+      <section id="trending">
+        <div className="observer-section-heading" style={{ marginTop: '4rem' }}>
+          <p>SECTION 02</p>
+          <div>
+            <h2>Trending News Pipeline</h2>
+            <small>Live topics synthesized from SERP trends + Gemini narrative.</small>
+          </div>
+          {ingestionStatus && (
+            <span
+              className={`observer-status observer-status--${ingestionStatus.lastRunStatus || 'idle'}`}
+            >
+              Last refresh:{' '}
+              {lastRefresh ? lastRefresh.toLocaleString() : 'pending'}
+            </span>
+          )}
+        </div>
+        {isStale && (
+          <p className="observer-stale-note">
+            Feeds look stale (older than 6 hours). An admin should trigger a refresh soon.
           </p>
         )}
-      </div>
-    </section>
+
+        <div className="observer-trending">
+          {trendingFeed.map((trend, idx) => {
+            const content = (
+              <>
+                <header>
+                  <span>Trend #{String(idx + 1).padStart(2, '0')}</span>
+                  <time>{getTimestamp(trend)}</time>
+                </header>
+                <h3>{trend.title || trend.topic}</h3>
+                <p>{trend.summary}</p>
+                {renderSourceList(trend)}
+              </>
+            );
+
+            if (trend._id) {
+              return (
+                <Link
+                  key={trend._id}
+                  href={`/story/${trend._id}`}
+                  className="observer-trending__card observer-trending__card-link"
+                >
+                  {content}
+                </Link>
+              );
+            }
+
+            return (
+              <article key={trend.topic || idx} className="observer-trending__card">
+                {content}
+              </article>
+            );
+          })}
+          {trendingItems.length === 0 && (
+            <p className="observer-trending__empty">
+              Trending feed will populate automatically once the pipeline runs.
+            </p>
+          )}
+        </div>
+      </section>
+
+      {topicalSections.map((section) => (
+        <section key={section.id} id={section.id} className="observer-topic-section">
+          <div className="observer-section-heading">
+            <p>{section.label.toUpperCase()}</p>
+            <div>
+              <h2>{section.title}</h2>
+              <small>{section.subtitle}</small>
+            </div>
+            {ingestionStatus?.counters && (
+              <span className="observer-status observer-status--muted">
+                {section.stories.length
+                  ? `Updated ${section.stories[0]?.generatedAt ? new Date(section.stories[0].generatedAt).toLocaleString() : 'recently'}`
+                  : 'Awaiting fresh feed'}
+              </span>
+            )}
+          </div>
+
+          <div className="observer-topic-grid">
+            {section.stories.length > 0
+              ? section.stories.slice(0, 4).map((story) => (
+                  <NewsCard key={story._id} item={story}>
+                    {renderCommentPreview(story)}
+                    {renderCommentComposer(story)}
+                  </NewsCard>
+                ))
+              : section.placeholders.map((placeholder, idx) => (
+                  <article key={`${section.id}-${idx}`} className="observer-topic-placeholder">
+                    <h3>{placeholder.topic}</h3>
+                    <p>{placeholder.summary}</p>
+                  </article>
+                ))}
+          </div>
+          {section.stories.length === 0 && (
+            <p className="observer-stale-note">
+              Live sources for {section.label} are temporarily unavailable. We will refresh the feed soon.
+            </p>
+          )}
+        </section>
+      ))}
+    </>
   );
 }
