@@ -4,23 +4,34 @@ const { getJson } = require('serpapi');
 const News = require('../models/News');
 const SystemStatus = require('../models/SystemStatus');
 
-const GEMINI_MODEL = 'gemini-1.5-flash-latest';
+// Try multiple model names in order of preference (fallback if one fails)
+// Updated based on actual available models from ListModels API
+// Using models that support generateContent method
+const GEMINI_MODELS = [
+  'gemini-2.5-flash',        // Latest stable flash model
+  'gemini-pro-latest',       // Latest pro model (backward compatible)
+  'gemini-flash-latest',     // Latest flash model (backward compatible)
+  'gemini-2.0-flash',        // Stable 2.0 flash
+  'gemini-2.5-pro',          // Latest pro model
+];
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const SUMMARY_MIN_WORDS = 100;
 const SUMMARY_MAX_WORDS = 140;
 
 // Gemini rate limiting: ensure we stay well under 10 calls per minute
-const GEMINI_MIN_INTERVAL_MS = 7000; // ~8–9 requests per minute
+// Increased to 8 seconds to be extra safe (7.5 calls/min max)
+const GEMINI_MIN_INTERVAL_MS = 8000; // ~7–8 requests per minute
 let lastGeminiCallAt = 0;
+let currentGeminiModelIndex = 0; // Track which model is currently working
 
 const delayIfNeededForGemini = async () => {
   const now = Date.now();
   const elapsed = now - lastGeminiCallAt;
 
   if (elapsed < GEMINI_MIN_INTERVAL_MS) {
-    await new Promise((resolve) =>
-      setTimeout(resolve, GEMINI_MIN_INTERVAL_MS - elapsed)
-    );
+    const waitTime = GEMINI_MIN_INTERVAL_MS - elapsed;
+    console.log(`[Gemini Rate Limit] Waiting ${waitTime}ms before next call...`);
+    await new Promise((resolve) => setTimeout(resolve, waitTime));
   }
 
   lastGeminiCallAt = Date.now();
@@ -225,7 +236,7 @@ const fetchCategoryArticles = async (feed, limit = 8) => {
     .filter((article) => Boolean(article.link));
 };
 
-const callGemini = async (prompt) => {
+const callGemini = async (prompt, retryCount = 0) => {
   if (!process.env.GOOGLE_API_KEY) {
     throw new Error('GOOGLE_API_KEY missing');
   }
@@ -233,12 +244,89 @@ const callGemini = async (prompt) => {
   // Enforce global rate limit so we never exceed ~10 calls/min
   await delayIfNeededForGemini();
 
-  const { data } = await axios.post(
-    `${GEMINI_ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${process.env.GOOGLE_API_KEY}`,
-    { contents: [{ parts: [{ text: prompt }] }] }
-  );
+  const model = GEMINI_MODELS[currentGeminiModelIndex] || GEMINI_MODELS[0];
+  const url = `${GEMINI_ENDPOINT}/${model}:generateContent?key=${process.env.GOOGLE_API_KEY}`;
 
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  try {
+    console.log(`[Gemini] Calling model: ${model} (attempt ${retryCount + 1})`);
+    const { data } = await axios.post(
+      url,
+      { contents: [{ parts: [{ text: prompt }] }] },
+      {
+        timeout: 60000, // 60 second timeout
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const responseText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+    if (!responseText) {
+      throw new Error('Empty response from Gemini API');
+    }
+    
+    // Success! Log which model worked
+    if (retryCount === 0) {
+      console.log(`[Gemini] Successfully using model: ${model}`);
+    }
+    
+    return responseText;
+  } catch (error) {
+    const statusCode = error.response?.status;
+    const errorMessage = error.response?.data?.error?.message || error.message;
+    const errorDetails = error.response?.data?.error || {};
+
+    // Handle 404 - try next model
+    if (statusCode === 404) {
+      console.warn(`[Gemini] Model ${model} returned 404: ${errorMessage}`);
+      const nextIndex = (currentGeminiModelIndex + 1) % GEMINI_MODELS.length;
+      
+      if (retryCount < GEMINI_MODELS.length - 1 && nextIndex !== currentGeminiModelIndex) {
+        currentGeminiModelIndex = nextIndex;
+        console.log(`[Gemini] Trying next model: ${GEMINI_MODELS[currentGeminiModelIndex]}`);
+        // Wait a bit before retrying with different model
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        return callGemini(prompt, retryCount + 1);
+      } else {
+        // All models tried, reset to first and throw
+        currentGeminiModelIndex = 0;
+        throw new Error(
+          `All Gemini models failed with 404. Tried: ${GEMINI_MODELS.join(', ')}. Last error: ${errorMessage}`
+        );
+      }
+    }
+
+    // Handle 429 (rate limit) - wait and retry
+    if (statusCode === 429) {
+      const waitTime = Math.min(60000, (retryCount + 1) * 10000); // Exponential backoff, max 60s
+      console.warn(`[Gemini] Rate limited (429), waiting ${waitTime}ms before retry...`);
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+      
+      if (retryCount < 3) {
+        return callGemini(prompt, retryCount + 1);
+      } else {
+        throw new Error(`Gemini API rate limit exceeded after ${retryCount + 1} retries`);
+      }
+    }
+
+    // Handle 400 (bad request) - might be API key or format issue
+    if (statusCode === 400) {
+      throw new Error(`Gemini API bad request (400): ${errorMessage}. Check your API key and request format.`);
+    }
+
+    // Handle 403 (forbidden) - API key issue
+    if (statusCode === 403) {
+      if (errorMessage.includes('leaked') || errorMessage.includes('invalid')) {
+        throw new Error(
+          `Gemini API key issue (403): ${errorMessage}. Please generate a new API key from Google AI Studio.`
+        );
+      }
+      throw new Error(`Gemini API forbidden (403): ${errorMessage}. Check API key permissions.`);
+    }
+
+    // Other errors - throw immediately
+    throw new Error(`Gemini API error (${statusCode || 'unknown'}): ${errorMessage}`);
+  }
 };
 
 const summarizeWithGemini = async (topic, trendData) => {
@@ -333,26 +421,31 @@ const ingestCategoryFeeds = async (issues) => {
       }
 
       // Process each article individually to create specific In-Depth Analysis
-      for (const article of articles.slice(0, 5)) {
-        // Limit to 5 articles per category to avoid overwhelming Gemini API
+      // Process 3 articles per category to fill frontend display capacity (up to 4 per section)
+      // 5 categories × 3 articles = 15 Gemini calls total
+      // With 8-second delays between calls, this takes ~2 minutes to complete safely
+      const articlesToProcess = articles.slice(0, 3);
+      console.log(`[Category Feed] Processing ${articlesToProcess.length} articles for ${feed.category} category`);
+      
+      for (const article of articlesToProcess) {
         try {
+          console.log(`[Category Feed] Generating analysis for: "${article.title}" (${feed.category})`);
+          
           // Generate analysis specific to this individual article
           const articleData = await summarizeArticlesWithGemini(article.title, [article]);
           
-          // Use article title as unique identifier (or combine with category)
-          const uniqueTopic = `${article.title} - ${feed.category}`;
-          
+          // Use primaryLink as the primary deduplication key to ensure uniqueness
+          // This prevents duplicate articles even if titles are similar
           const record = await News.findOneAndUpdate(
             { 
-              topic: uniqueTopic,
-              primaryLink: article.link // Also match by link to avoid duplicates
+              primaryLink: article.link // Primary key: match by article URL to avoid duplicates
             },
             {
               $set: {
-                topic: article.title,
-                title: articleData.title || article.title,
+                topic: article.title, // Individual article headline
+                title: articleData.title || article.title, // Gemini-generated or original title
                 summary: articleData.summary || normalizeSummaryLength(article.snippet, [article]),
-                content: articleData.content || article.snippet || 'Analysis unavailable.',
+                content: articleData.content || article.snippet || 'Analysis unavailable.', // Individual in-depth analysis
                 category: feed.category,
                 tags: articleData.tags.length ? articleData.tags : feed.tags,
                 sourceOptions: [article],
@@ -376,6 +469,7 @@ const ingestCategoryFeeds = async (issues) => {
             { upsert: true, new: true, setDefaultsOnInsert: true }
           );
 
+          console.log(`[MongoDB] ✅ Stored category article: "${record.title}" (ID: ${record._id}) in ${feed.category}`);
           categoryRecords.push(record);
         } catch (articleError) {
           const articleMessage = `Failed to process article "${article.title}" in ${feed.id}: ${articleError.message}`;
@@ -472,6 +566,7 @@ const runTrendingIngestion = async () => {
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
+      console.log(`[MongoDB] ✅ Stored trending topic: "${topic}" (ID: ${record._id})`);
       trendingCount += 1;
       results.push(record);
     } catch (error) {
@@ -499,6 +594,9 @@ const runTrendingIngestion = async () => {
     counters,
   });
 
+  console.log(`[MongoDB] 📊 Storage Summary: ${counters.trending} trending topics + ${counters.categories} category articles = ${results.length} total records stored`);
+  console.log(`[MongoDB] ✅ All content successfully stored in MongoDB`);
+
   return results;
 };
 
@@ -508,7 +606,7 @@ const scheduleAutoTrendingRefresh = () => {
     return cronJob;
   }
 
-  // Default: refresh section feeds every 6 hours (~4 times per day)
+  // Default: refresh both trending and category feeds every 6 hours (~4 times per day)
   // Cron format: minute hour day month day-of-week
   // '0 */6 * * *' = at minute 0 of every 6th hour (00:00, 06:00, 12:00, 18:00)
   const expression = process.env.TRENDING_REFRESH_CRON || '0 */6 * * *';
@@ -517,26 +615,36 @@ const scheduleAutoTrendingRefresh = () => {
     expression,
     async () => {
       try {
-        console.log(`[Cron] Starting scheduled category feed refresh at ${new Date().toISOString()}`);
-        const results = await refreshCategoryFeeds();
-        console.log(`[Cron] Category feed refresh completed: ${results.length} articles refreshed`);
+        console.log(`[Cron] Starting scheduled refresh at ${new Date().toISOString()}`);
+        await runTrendingIngestion();
+        console.log(`[Cron] Scheduled refresh completed`);
       } catch (error) {
-        console.error('[Cron] Section feed refresh task failed:', error.message);
+        console.error('[Cron] Scheduled refresh task failed:', error.message);
         console.error(error.stack);
       }
     },
     { scheduled: true }
   );
 
-  // Initial prime of category feeds (non-blocking)
+  // Initial prime: fetch both trending topics and category feeds on server startup (non-blocking)
+  // This ensures all content is stored in MongoDB every time the server restarts
   (async () => {
     try {
-      console.log('[Cron] Running initial category feed refresh...');
-      const results = await refreshCategoryFeeds();
-      console.log(`[Cron] Initial refresh completed: ${results.length} articles refreshed`);
+      console.log('[Startup] ========================================');
+      console.log('[Startup] Running initial content fetch on server restart...');
+      console.log('[Startup] Fetching trending topics and category feeds...');
+      console.log('[Startup] All content will be stored in MongoDB.');
+      console.log('[Startup] ========================================');
+      
+      // Fetch both trending topics and category feeds
+      // This ensures content is available immediately after server restart
+      await runTrendingIngestion();
+      
+      console.log('[Startup] ✅ Initial content fetch completed.');
+      console.log('[Startup] All trending topics and category feeds stored in MongoDB.');
     } catch (error) {
-      console.error('[Cron] Initial section feed refresh failed:', error.message);
-      console.error(error.stack);
+      console.error('[Startup] ❌ Initial content fetch failed:', error.message);
+      console.error('[Startup] Error details:', error.stack);
     }
   })();
 
