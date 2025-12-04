@@ -496,24 +496,36 @@ const scheduleAutoTrendingRefresh = () => {
   }
 
   // Default: refresh section feeds every 6 hours (~4 times per day)
+  // Cron format: minute hour day month day-of-week
+  // '0 */6 * * *' = at minute 0 of every 6th hour (00:00, 06:00, 12:00, 18:00)
   const expression = process.env.TRENDING_REFRESH_CRON || '0 */6 * * *';
 
   cronJob = cron.schedule(
     expression,
     async () => {
       try {
-        await refreshCategoryFeeds();
+        console.log(`[Cron] Starting scheduled category feed refresh at ${new Date().toISOString()}`);
+        const results = await refreshCategoryFeeds();
+        console.log(`[Cron] Category feed refresh completed: ${results.length} articles refreshed`);
       } catch (error) {
-        console.error('Section feed refresh task failed:', error.message);
+        console.error('[Cron] Section feed refresh task failed:', error.message);
+        console.error(error.stack);
       }
     },
     { scheduled: true }
   );
 
-  // Initial prime of category feeds
-  refreshCategoryFeeds().catch((error) => {
-    console.error('Initial section feed refresh failed:', error.message);
-  });
+  // Initial prime of category feeds (non-blocking)
+  (async () => {
+    try {
+      console.log('[Cron] Running initial category feed refresh...');
+      const results = await refreshCategoryFeeds();
+      console.log(`[Cron] Initial refresh completed: ${results.length} articles refreshed`);
+    } catch (error) {
+      console.error('[Cron] Initial section feed refresh failed:', error.message);
+      console.error(error.stack);
+    }
+  })();
 
   return cronJob;
 };
