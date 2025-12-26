@@ -4,13 +4,13 @@ const { getJson } = require('serpapi');
 const News = require('../models/News');
 const SystemStatus = require('../models/SystemStatus');
 
-const GEMINI_MODEL = 'gemini-1.5-flash-latest';
+const GEMINI_MODEL = 'gemini-robotics-er-1.5-preview';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const SUMMARY_MIN_WORDS = 100;
 const SUMMARY_MAX_WORDS = 140;
 
 // Gemini rate limiting: ensure we stay well under 10 calls per minute
-const GEMINI_MIN_INTERVAL_MS = 7000; // ~8–9 requests per minute
+const GEMINI_MIN_INTERVAL_MS = 12500; // ~8–9 requests per minute
 let lastGeminiCallAt = 0;
 
 const delayIfNeededForGemini = async () => {
@@ -233,12 +233,49 @@ const callGemini = async (prompt) => {
   // Enforce global rate limit so we never exceed ~10 calls/min
   await delayIfNeededForGemini();
 
-  const { data } = await axios.post(
-    `${GEMINI_ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${process.env.GOOGLE_API_KEY}`,
-    { contents: [{ parts: [{ text: prompt }] }] }
-  );
+  // Check prompt length (Gemini 1.5 Flash supports up to ~1M tokens, but very long prompts may cause issues)
+  const promptLength = prompt.length;
+  if (promptLength > 1000000) {
+    throw new Error(`Prompt too long: ${promptLength} characters (max ~1M tokens)`);
+  }
 
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  try {
+    const { data } = await axios.post(
+      `${GEMINI_ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${process.env.GOOGLE_API_KEY}`,
+      { contents: [{ parts: [{ text: prompt }] }] }
+    );
+
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  } catch (error) {
+    // Log detailed error information for debugging
+    if (error.response) {
+      // HTTP error response from Gemini API
+      const status = error.response.status;
+      const errorData = error.response.data;
+      const errorMessage = errorData?.error?.message || errorData?.message || error.message;
+      
+      console.error(`Gemini API error (${status}):`, {
+        message: errorMessage,
+        details: errorData?.error?.details || errorData,
+        promptLength: promptLength,
+        model: GEMINI_MODEL
+      });
+      
+      // Throw a more descriptive error
+      throw new Error(`Gemini API ${status}: ${errorMessage}`);
+    } else if (error.request) {
+      // Request was made but no response received
+      console.error('Gemini API: No response received', {
+        message: error.message,
+        promptLength: promptLength
+      });
+      throw new Error(`Gemini API: No response - ${error.message}`);
+    } else {
+      // Error setting up the request
+      console.error('Gemini API: Request setup error', error.message);
+      throw error;
+    }
+  }
 };
 
 const summarizeWithGemini = async (topic, trendData) => {
@@ -260,16 +297,39 @@ const summarizeWithGemini = async (topic, trendData) => {
   }
 };
 
+// Helper function to attempt to fix common JSON issues
+const tryFixJson = (jsonString) => {
+  // Try to fix unescaped quotes in string values (basic attempt)
+  // This is a simple heuristic and may not catch all cases
+  try {
+    // First, try parsing as-is
+    return JSON.parse(jsonString);
+  } catch (e) {
+    // If parsing fails, try to fix common issues
+    // Note: This is a best-effort fix and may not work for all malformed JSON
+    console.warn('Attempting to fix malformed JSON...');
+    // Return null to indicate fix failed - will fall back to error handling
+    return null;
+  }
+};
+
 const summarizeArticlesWithGemini = async (topic, articles) => {
   if (!Array.isArray(articles) || !articles.length) {
     throw new Error('No articles available to summarize');
   }
 
+  // Limit snippet length to prevent extremely long prompts (max 2000 chars per snippet)
+  const truncateSnippet = (text, maxLength = 2000) => {
+    if (!text || text.length <= maxLength) return text;
+    return text.substring(0, maxLength - 3) + '...';
+  };
+
   const articlesText = articles
     .map((article, index) => {
-      const safeSnippet = article.snippet || 'No synopsis available';
+      const safeSnippet = truncateSnippet(article.snippet || 'No synopsis available');
+      const safeTitle = truncateSnippet(article.title || 'Untitled', 500);
       return `Article ${index + 1}:
-Title: ${article.title}
+Title: ${safeTitle}
 Source: ${article.source || 'Unknown'}
 Summary: ${safeSnippet}
 Link: ${article.link || 'N/A'}`;
@@ -285,14 +345,57 @@ Link: ${article.link || 'N/A'}`;
     'Content should be 4-6 paragraphs (300-500 words). Summary must be 2 sentences. Provide a relevant category and 3 tags.',
   ].join('\n\n');
 
+  // Log prompt length for debugging
+  if (prompt.length > 50000) {
+    console.warn(`Warning: Very long prompt (${prompt.length} chars) for topic: ${topic}`);
+  }
+
   try {
     const responseText = await callGemini(prompt);
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+    
+    // Try to extract JSON from markdown code blocks first (```json ... ```)
+    let jsonString = null;
+    const codeBlockMatch = responseText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    if (codeBlockMatch) {
+      jsonString = codeBlockMatch[1];
+    } else {
+      // Fallback to extracting JSON object directly
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        jsonString = jsonMatch[0];
+      }
+    }
+    
+    if (!jsonString) {
+      console.error('Gemini response missing JSON. Full response:', responseText.substring(0, 500));
       throw new Error('Gemini response missing JSON');
     }
 
-    const parsed = JSON.parse(jsonMatch[0]);
+    // Log the JSON string being parsed for debugging (truncated)
+    if (jsonString.length > 1000) {
+      console.log('Parsing JSON (truncated):', jsonString.substring(0, 1000) + '...');
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonString);
+    } catch (parseError) {
+      // Extract position from error message if available
+      const positionMatch = parseError.message.match(/position (\d+)/);
+      const errorPosition = positionMatch ? parseInt(positionMatch[1]) : null;
+      
+      console.error('JSON parse error:', parseError.message);
+      console.error('JSON string length:', jsonString.length);
+      console.error('JSON string (first 2000 chars):', jsonString.substring(0, 2000));
+      
+      if (errorPosition) {
+        const start = Math.max(0, errorPosition - 200);
+        const end = Math.min(jsonString.length, errorPosition + 200);
+        console.error(`JSON string (around error position ${errorPosition}):`, jsonString.substring(start, end));
+      }
+      
+      throw new Error(`Invalid JSON from Gemini: ${parseError.message}`);
+    }
     const normalizedSummary = normalizeSummaryLength(parsed.summary || parsed.content, articles);
     return {
       title: parsed.title || topic,
@@ -303,16 +406,12 @@ Link: ${article.link || 'N/A'}`;
     };
   } catch (error) {
     console.error('Gemini article synthesis failed:', error.message);
-    const fallbackSummary = `Highlights for ${topic}: ${articles
-      .slice(0, 2)
-      .map((article) => article.snippet || article.title)
-      .join(' / ')}`;
     return {
-      title: `Trending: ${topic}`,
-      content: articles.map((article, idx) => `${idx + 1}. ${article.title} - ${article.snippet || ''}`).join('\n'),
-      summary: normalizeSummaryLength(fallbackSummary, articles),
+      title: topic,
+      content: 'Article not generated',
+      summary: 'Article not generated',
       category: 'General',
-      tags: [topic.toLowerCase().replace(/\s+/g, '-'), 'trending'],
+      tags: [],
     };
   }
 };
@@ -336,45 +435,85 @@ const ingestCategoryFeeds = async (issues) => {
       for (const article of articles.slice(0, 5)) {
         // Limit to 5 articles per category to avoid overwhelming Gemini API
         try {
+          // Skip if article has no link (can't deduplicate without it)
+          if (!article.link) {
+            continue;
+          }
+
           // Generate analysis specific to this individual article
           const articleData = await summarizeArticlesWithGemini(article.title, [article]);
           
-          // Use article title as unique identifier (or combine with category)
-          const uniqueTopic = `${article.title} - ${feed.category}`;
+          // Use primaryLink as the GLOBAL unique identifier to prevent duplicates across all categories
+          // Normalize the link to handle URL variations (trailing slashes, query params, etc.)
+          const normalizedLink = article.link?.split('?')[0]?.replace(/\/$/, '');
           
-          const record = await News.findOneAndUpdate(
-            { 
-              topic: uniqueTopic,
-              primaryLink: article.link // Also match by link to avoid duplicates
-            },
-            {
-              $set: {
-                topic: article.title,
-                title: articleData.title || article.title,
-                summary: articleData.summary || normalizeSummaryLength(article.snippet, [article]),
-                content: articleData.content || article.snippet || 'Analysis unavailable.',
-                category: feed.category,
-                tags: articleData.tags.length ? articleData.tags : feed.tags,
-                sourceOptions: [article],
-                availableSources: article.source ? [article.source] : [],
-                selectedSource: article.source || null,
-                primarySource: article.source || null,
-                primaryLink: article.link || null,
-                externalUrl: article.link || null,
-                imageUrl: article.imageUrl || null,
-                generatedAt: new Date(),
-                isTrending: false,
-                autoGenerated: true,
-                fromNewsApi: true,
-                status: 'published',
-                publishedAt: new Date(),
-              },
-              $setOnInsert: {
-                interestOverTime: [],
-              },
-            },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-          );
+          // Check if article already exists by primaryLink (globally, not per category)
+          const existingRecord = await News.findOne({
+            $or: [
+              { primaryLink: normalizedLink },
+              { primaryLink: article.link },
+              { externalUrl: normalizedLink },
+              { externalUrl: article.link }
+            ],
+            autoGenerated: true,
+            fromNewsApi: true
+          });
+
+          if (existingRecord) {
+            // Article already exists - update it but don't create duplicate
+            // Merge categories if different, update metadata
+            const existingCategories = existingRecord.category ? [existingRecord.category] : [];
+            const newCategory = feed.category;
+            if (!existingCategories.includes(newCategory)) {
+              existingCategories.push(newCategory);
+            }
+            
+            // Update the existing record with latest data
+            existingRecord.topic = article.title;
+            existingRecord.title = articleData.title || article.title;
+            existingRecord.summary = articleData.summary || normalizeSummaryLength(article.snippet, [article]);
+            existingRecord.content = articleData.content || article.snippet || 'Analysis unavailable.';
+            existingRecord.category = newCategory; // Use the most recent category
+            existingRecord.tags = articleData.tags.length ? articleData.tags : feed.tags;
+            existingRecord.sourceOptions = [article];
+            existingRecord.availableSources = article.source ? [article.source] : [];
+            existingRecord.selectedSource = article.source || null;
+            existingRecord.primarySource = article.source || null;
+            existingRecord.primaryLink = article.link;
+            existingRecord.externalUrl = article.link;
+            existingRecord.imageUrl = article.imageUrl || null;
+            existingRecord.generatedAt = new Date();
+            existingRecord.status = 'published';
+            existingRecord.publishedAt = new Date();
+            await existingRecord.save();
+            
+            categoryRecords.push(existingRecord);
+            continue; // Skip creating a new record
+          }
+          
+          // Article doesn't exist - create new record
+          const record = await News.create({
+            topic: article.title,
+            title: articleData.title || article.title,
+            summary: articleData.summary || normalizeSummaryLength(article.snippet, [article]),
+            content: articleData.content || article.snippet || 'Analysis unavailable.',
+            category: feed.category,
+            tags: articleData.tags.length ? articleData.tags : feed.tags,
+            sourceOptions: [article],
+            availableSources: article.source ? [article.source] : [],
+            selectedSource: article.source || null,
+            primarySource: article.source || null,
+            primaryLink: article.link,
+            externalUrl: article.link,
+            imageUrl: article.imageUrl || null,
+            generatedAt: new Date(),
+            isTrending: false,
+            autoGenerated: true,
+            fromNewsApi: true,
+            status: 'published',
+            publishedAt: new Date(),
+            interestOverTime: [],
+          });
 
           categoryRecords.push(record);
         } catch (articleError) {
@@ -562,6 +701,40 @@ const generateNewsFromTopic = async ({ topic, autoPublish = false, authorId = nu
     new Set(articles.map((article) => article.source).filter(Boolean))
   );
   const firstArticle = articles[0];
+
+  // Check for existing article by topic or primaryLink to prevent duplicates
+  const existingNews = await News.findOne({
+    $or: [
+      { topic },
+      ...(firstArticle.link ? [{ primaryLink: firstArticle.link }] : [])
+    ],
+    autoGenerated: true,
+    fromNewsApi: true
+  });
+
+  if (existingNews) {
+    // Update existing record instead of creating duplicate
+    existingNews.title = articleData.title || topic;
+    existingNews.summary = articleData.summary || normalizeSummaryLength(articles[0]?.snippet, articles);
+    existingNews.content = articleData.content;
+    existingNews.category = articleData.category;
+    existingNews.tags = articleData.tags;
+    existingNews.interestOverTime = insights?.interest_over_time || [];
+    existingNews.availableSources = availableSources;
+    existingNews.sourceOptions = articles;
+    existingNews.selectedSource = availableSources[0] || null;
+    existingNews.primarySource = firstArticle.source || null;
+    existingNews.primaryLink = firstArticle.link || null;
+    existingNews.externalUrl = firstArticle.link || null;
+    existingNews.imageUrl = firstArticle.imageUrl || null;
+    existingNews.generatedAt = new Date();
+    if (autoPublish) {
+      existingNews.status = 'published';
+      existingNews.publishedAt = new Date();
+    }
+    await existingNews.save();
+    return existingNews;
+  }
 
   const record = await News.create({
     topic,

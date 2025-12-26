@@ -174,8 +174,17 @@ export default function Home() {
       getTrendingNews(),
       getTrendingStatus().catch(() => ({ data: null })),
     ]);
-    setItems(published);
-    setTrendingItems(trending);
+    
+    // Deduplicate by _id to prevent duplicate rendering
+    const uniquePublished = Array.from(
+      new Map(published?.map((item) => [item._id, item]) || []).values()
+    );
+    const uniqueTrending = Array.from(
+      new Map(trending?.map((item) => [item._id, item]) || []).values()
+    );
+    
+    setItems(uniquePublished);
+    setTrendingItems(uniqueTrending);
     setIngestionStatus(statusResponse?.data || null);
   };
 
@@ -430,7 +439,7 @@ export default function Home() {
 
         <aside className="observer-watch">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <p className="observer-section-title" style={{ marginBottom: 0 }}>FEATURED VIDEOS</p>
+            <p className="observer-section-title" style={{ marginBottom: 0 }}>FEATURED STORIES</p>
             <span style={{ fontSize: '0.85rem', color: '#64748b' }}>{'>'}</span>
           </div>
           <div
@@ -439,7 +448,7 @@ export default function Home() {
               backgroundImage: watchItems[0]?.thumbnail ? `url(${watchItems[0].thumbnail})` : undefined,
             }}
           >
-            <button type="button" aria-label="Play video">▶</button>
+            {/* <button type="button" aria-label="Play video">▶</button> */}
           </div>
           <div className="observer-watch__list">
             {watchItems.map((video, idx) => (
