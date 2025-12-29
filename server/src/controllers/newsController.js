@@ -3,7 +3,7 @@ const { generateNewsFromTopic } = require('../services/trendingService');
 
 const getPublishedNews = async (req, res) => {
   const news = await News.find({ status: 'published' })
-    .sort({ publishedAt: -1 })
+    .sort({ publishedAt: -1, generatedAt: -1, createdAt: -1 })
     .populate('comments.user', 'name role');
   res.json(news);
 };

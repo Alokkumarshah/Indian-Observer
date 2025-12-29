@@ -218,28 +218,14 @@ export default function Home() {
     }
   };
 
-  const heroStory = items[0] || placeholderHero;
-  const contentPool = heroStory._id ? items.slice(1) : items;
+  const heroStory = items[0] || null;
+  const contentPool = heroStory?._id ? items.slice(1) : items;
 
   const subStories = useMemo(() => {
-    const pool = contentPool.slice(0, 2);
-    if (pool.length === 0) {
-      return [
-        {
-          topic: 'States push for larger GST compensation window',
-          summary: 'Finance ministers from multiple states will seek an extension at the upcoming council meet.',
-        },
-        {
-          topic: 'Chandrayaan team eyes lunar south pole base plan',
-          summary: 'Scientists outline habitat architecture alongside ISRO’s next mission cycle.',
-        },
-      ];
-    }
-    return pool;
+    return contentPool.slice(0, 2);
   }, [contentPool]);
 
   const briefs = useMemo(() => {
-    if (items.length === 0) return placeholderBriefs;
     return items.slice(0, 6).map((item) => ({
       id: item._id,
       category: item.category || item.tags?.[0] || 'Latest',
@@ -248,9 +234,7 @@ export default function Home() {
   }, [items]);
 
   const watchItems = useMemo(() => {
-    const source = items.slice(1, 5);
-    if (!source.length) return placeholderVideos;
-    return source.map((item) => ({
+    return items.slice(1, 5).map((item) => ({
       title: item.title || item.topic,
       thumbnail: item.imageUrl || item.primaryImage || null,
     }));
@@ -262,9 +246,6 @@ export default function Home() {
       const label = story.category || story.tags?.[0];
       if (label) base.add(label);
     });
-    if (base.size === 1) {
-      placeholderTimeline.forEach((story) => base.add(story.category));
-    }
     return Array.from(base);
   }, [contentPool]);
 
@@ -277,8 +258,7 @@ export default function Home() {
     });
   }, [contentPool, activeFilter]);
 
-  const timelineSource = filteredStories.length ? filteredStories : placeholderTimeline;
-  const timelineStories = timelineSource.slice(0, visibleCount);
+  const timelineStories = filteredStories.slice(0, visibleCount);
 
   const getStoryCategory = (story) => story.category || story.tags?.[0] || 'Latest';
 
@@ -333,7 +313,7 @@ export default function Home() {
     return !loading ? <small>Login or register to comment.</small> : null;
   };
 
-  const trendingFeed = trendingItems.length ? trendingItems : placeholderTrending;
+  const trendingFeed = trendingItems;
   const lastRefresh =
     ingestionStatus?.lastRunFinishedAt && new Date(ingestionStatus.lastRunFinishedAt);
   const isStale =
@@ -355,12 +335,28 @@ export default function Home() {
 
     return (
       <ul className="observer-source-list">
-        {story.sourceOptions.slice(0, 3).map((option, idx) => (
-          <li key={`${story.topic || story.title || 'story'}-${idx}`}>
-            <span>{option.source || 'Source'}</span>
-            {option.snippet && <small>{option.snippet}</small>}
-          </li>
-        ))}
+        {story.sourceOptions.slice(0, 3).map((option, idx) => {
+          const sourceLink = option.link || option.news_url || null;
+          const sourceName = option.source || 'Source';
+          
+          return (
+            <li key={`${story.topic || story.title || 'story'}-${idx}`}>
+              {sourceLink ? (
+                <a
+                  href={sourceLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="observer-source-link"
+                >
+                  <span>{sourceName}</span>
+                </a>
+              ) : (
+                <span>{sourceName}</span>
+              )}
+              {option.snippet && <small>{option.snippet}</small>}
+            </li>
+          );
+        })}
       </ul>
     );
   };
@@ -379,62 +375,78 @@ export default function Home() {
       <div className="observer-grid">
         <aside className="observer-briefs">
           <p className="observer-section-title">TOP BRIEFS</p>
-          {briefs.map((brief, idx) => {
-            const content = (
-              <>
-                <small>{brief.category.toUpperCase()}</small>
-                <p>{brief.headline}</p>
-              </>
-            );
-            return (
-              <div key={`${brief.headline}-${idx}`} className="observer-brief">
-                {brief.id ? (
-                  <Link href={`/story/${brief.id}`} className="observer-brief__link">
-                    {content}
-                  </Link>
-                ) : (
-                  content
-                )}
-              </div>
-            );
-          })}
+          {briefs.length > 0 ? (
+            briefs.map((brief, idx) => {
+              const content = (
+                <>
+                  <small>{brief.category.toUpperCase()}</small>
+                  <p>{brief.headline}</p>
+                </>
+              );
+              return (
+                <div key={brief.id || `brief-${idx}`} className="observer-brief">
+                  {brief.id ? (
+                    <Link href={`/story/${brief.id}`} className="observer-brief__link">
+                      {content}
+                    </Link>
+                  ) : (
+                    content
+                  )}
+                </div>
+              );
+            })
+          ) : (
+            <p style={{ color: '#64748b', fontStyle: 'italic', fontSize: '0.9rem' }}>
+              No briefs available. News will appear here once published.
+            </p>
+          )}
         </aside>
 
         <div>
-          <article className="observer-hero">
-            <h1>{heroStory.title || heroStory.topic}</h1>
-            <div
-              className="observer-hero__image"
-              style={{
-                backgroundImage: heroStory.imageUrl ? `url(${heroStory.imageUrl})` : undefined,
-              }}
-            />
-            <p className="observer-hero__summary">{heroStory.summary}</p>
+          {heroStory ? (
+            <article className="observer-hero">
+              <h1>{heroStory.title || heroStory.topic}</h1>
+              <div
+                className="observer-hero__image"
+                style={{
+                  backgroundImage: heroStory.imageUrl ? `url(${heroStory.imageUrl})` : undefined,
+                }}
+              />
+              <p className="observer-hero__summary">{heroStory.summary}</p>
 
-            {heroStory._id && (
-              <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                <Link href={`/story/${heroStory._id}`} className="btn">
-                  Read Observer summary
-                </Link>
-                {renderCommentComposer(heroStory)}
-              </div>
-            )}
-          </article>
-
-          <div className="observer-subgrid">
-            {subStories.map((story, idx) => (
-              <div key={`${story.topic}-${idx}`} className="observer-substory">
-                {story._id ? (
-                  <Link href={`/story/${story._id}`}>
-                    <h3>{story.title || story.topic}</h3>
+              {heroStory._id && (
+                <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <Link href={`/story/${heroStory._id}`} className="btn">
+                    Read Observer summary
                   </Link>
-                ) : (
-                  <h3>{story.title || story.topic}</h3>
-                )}
-                <p>{story.summary}</p>
-              </div>
-            ))}
-          </div>
+                  {renderCommentComposer(heroStory)}
+                </div>
+              )}
+            </article>
+          ) : (
+            <article className="observer-hero">
+              <p style={{ color: '#64748b', fontStyle: 'italic' }}>
+                No featured story available. News will appear here once the ingestion pipeline runs.
+              </p>
+            </article>
+          )}
+
+          {subStories.length > 0 && (
+            <div className="observer-subgrid">
+              {subStories.map((story, idx) => (
+                <div key={story._id || `story-${idx}`} className="observer-substory">
+                  {story._id ? (
+                    <Link href={`/story/${story._id}`}>
+                      <h3>{story.title || story.topic}</h3>
+                    </Link>
+                  ) : (
+                    <h3>{story.title || story.topic}</h3>
+                  )}
+                  <p>{story.summary}</p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <aside className="observer-watch">
@@ -451,15 +463,21 @@ export default function Home() {
             {/* <button type="button" aria-label="Play video">▶</button> */}
           </div>
           <div className="observer-watch__list">
-            {watchItems.map((video, idx) => (
-              <div key={`${video.title}-${idx}`} className="observer-watch__item">
-                <div
-                  className="observer-watch__thumb"
-                  style={{ backgroundImage: video.thumbnail ? `url(${video.thumbnail})` : undefined }}
-                />
-                <p>{video.title}</p>
-              </div>
-            ))}
+            {watchItems.length > 0 ? (
+              watchItems.map((video, idx) => (
+                <div key={`${video.title}-${idx}`} className="observer-watch__item">
+                  <div
+                    className="observer-watch__thumb"
+                    style={{ backgroundImage: video.thumbnail ? `url(${video.thumbnail})` : undefined }}
+                  />
+                  <p>{video.title}</p>
+                </div>
+              ))
+            ) : (
+              <p style={{ color: '#64748b', fontStyle: 'italic', fontSize: '0.9rem', padding: '1rem' }}>
+                No featured stories available.
+              </p>
+            )}
           </div>
         </aside>
       </div>
@@ -482,32 +500,32 @@ export default function Home() {
         </div>
 
         <div className="observer-timeline">
-          {timelineStories.map((story, idx) => {
-            const category = getStoryCategory(story);
-            const timestamp = story._id ? getTimestamp(story) : 'Updated just now';
-            const key = story._id || `placeholder-${idx}`;
+          {timelineStories.length > 0 ? (
+            timelineStories.map((story, idx) => {
+              const category = getStoryCategory(story);
+              const timestamp = story._id ? getTimestamp(story) : 'Updated just now';
 
-            return (
-              <div key={key} className="observer-timeline__item">
-                <span className="observer-timeline__dot" />
-                <div className="observer-timeline__meta">
-                  <span>{category.toUpperCase()}</span>
-                  <time>{timestamp}</time>
-                </div>
-                {story._id ? (
-                  <NewsCard item={story}>
-                    {renderCommentPreview(story)}
-                    {renderCommentComposer(story)}
-                  </NewsCard>
-                ) : (
-                  <div className="observer-timeline__placeholder">
-                    <h4>{story.topic}</h4>
-                    <p>{story.summary}</p>
+              return (
+                <div key={story._id || `story-${idx}`} className="observer-timeline__item">
+                  <span className="observer-timeline__dot" />
+                  <div className="observer-timeline__meta">
+                    <span>{category.toUpperCase()}</span>
+                    <time>{timestamp}</time>
                   </div>
-                )}
-              </div>
-            );
-          })}
+                  {story._id && (
+                    <NewsCard item={story}>
+                      {renderCommentPreview(story)}
+                      {renderCommentComposer(story)}
+                    </NewsCard>
+                  )}
+                </div>
+              );
+            })
+          ) : (
+            <p style={{ color: '#64748b', fontStyle: 'italic', marginTop: '2rem' }}>
+              No stories available in this category. News will appear here once published.
+            </p>
+          )}
         </div>
 
         {timelineSource.length > visibleCount && (
@@ -547,38 +565,48 @@ export default function Home() {
         )}
 
         <div className="observer-trending">
-          {trendingFeed.map((trend, idx) => {
-            const content = (
-              <>
-                <header>
-                  <span>Trend #{String(idx + 1).padStart(2, '0')}</span>
-                  <time>{getTimestamp(trend)}</time>
-                </header>
-                <h3>{trend.title || trend.topic}</h3>
-                <p>{trend.summary}</p>
-                {renderSourceList(trend)}
-              </>
-            );
-
-            if (trend._id) {
-              return (
-                <Link
-                  key={trend._id}
-                  href={`/story/${trend._id}`}
-                  className="observer-trending__card observer-trending__card-link"
-                >
-                  {content}
-                </Link>
+          {trendingFeed.length > 0 ? (
+            trendingFeed.map((trend, idx) => {
+              const externalUrl = trend.externalUrl || trend.primaryLink;
+              const storyUrl = trend._id ? `/story/${trend._id}` : null;
+              
+              const content = (
+                <>
+                  <header>
+                    <span>Trend #{String(idx + 1).padStart(2, '0')}</span>
+                    <time>{getTimestamp(trend)}</time>
+                  </header>
+                  <h3>{trend.title || trend.topic}</h3>
+                  <p>{trend.summary}</p>
+                  {renderSourceList(trend)}
+                  <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    {storyUrl && (
+                      <Link href={storyUrl} className="btn" onClick={(e) => e.stopPropagation()}>
+                        View In-Depth Analysis
+                      </Link>
+                    )}
+                    {externalUrl && (
+                      <a
+                        href={externalUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn secondary"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        Read Original
+                      </a>
+                    )}
+                  </div>
+                </>
               );
-            }
 
-            return (
-              <article key={trend.topic || idx} className="observer-trending__card">
-                {content}
-              </article>
-            );
-          })}
-          {trendingItems.length === 0 && (
+              return (
+                <article key={trend._id || `trend-${idx}`} className="observer-trending__card">
+                  {content}
+                </article>
+              );
+            })
+          ) : (
             <p className="observer-trending__empty">
               Trending feed will populate automatically once the pipeline runs.
             </p>
@@ -604,25 +632,19 @@ export default function Home() {
           </div>
 
           <div className="observer-topic-grid">
-            {section.stories.length > 0
-              ? section.stories.slice(0, 4).map((story) => (
-                  <NewsCard key={story._id} item={story}>
-                    {renderCommentPreview(story)}
-                    {renderCommentComposer(story)}
-                  </NewsCard>
-                ))
-              : section.placeholders.map((placeholder, idx) => (
-                  <article key={`${section.id}-${idx}`} className="observer-topic-placeholder">
-                    <h3>{placeholder.topic}</h3>
-                    <p>{placeholder.summary}</p>
-                  </article>
-                ))}
+            {section.stories.length > 0 ? (
+              section.stories.slice(0, 4).map((story) => (
+                <NewsCard key={story._id} item={story}>
+                  {renderCommentPreview(story)}
+                  {renderCommentComposer(story)}
+                </NewsCard>
+              ))
+            ) : (
+              <p style={{ color: '#64748b', fontStyle: 'italic', gridColumn: '1 / -1', padding: '2rem' }}>
+                No stories available in {section.label} category. News will appear here once the ingestion pipeline runs.
+              </p>
+            )}
           </div>
-          {section.stories.length === 0 && (
-            <p className="observer-stale-note">
-              Live sources for {section.label} are temporarily unavailable. We will refresh the feed soon.
-            </p>
-          )}
         </section>
       ))}
     </>

@@ -13,7 +13,8 @@ const forceRefreshTrending = async (req, res) => {
 };
 
 const listTrending = async (req, res) => {
-  const news = await News.find({ isTrending: true }).sort({ generatedAt: -1 });
+  const news = await News.find({ isTrending: true })
+    .sort({ generatedAt: -1, publishedAt: -1, createdAt: -1 });
   res.json(news);
 };
 

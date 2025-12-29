@@ -194,8 +194,21 @@ export default function StoryDetailPage() {
           <h2>Observer Summary</h2>
           <p className="story-detail__summary">{story.summary}</p>
 
+          {(story.externalUrl || story.primaryLink) && (
+            <div style={{ marginTop: '1rem', marginBottom: '1rem' }}>
+              <a
+                href={story.externalUrl || story.primaryLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn"
+              >
+                Read Original Article
+              </a>
+            </div>
+          )}
+
           {story.content && (
-            <section className="story-detail__analysis">
+            <section className="story-detail__analysis" id="in-depth-analysis">
               <h3>In-depth Analysis</h3>
               <div className="story-detail__analysis-content">
                 {story.content
@@ -206,6 +219,40 @@ export default function StoryDetailPage() {
                     <p key={index}>{block}</p>
                   ))}
               </div>
+            </section>
+          )}
+
+          {relatedArticles.length > 0 && (
+            <section className="story-detail__sources">
+              <h3>Source Articles</h3>
+              <ul className="story-detail__source-list">
+                {relatedArticles.map((article) => (
+                  <li key={article.id}>
+                    {article.link ? (
+                      <a
+                        href={article.link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="story-detail__source-link"
+                      >
+                        <strong>{article.source}</strong>
+                        {article.title && article.title !== article.source && (
+                          <span> - {article.title}</span>
+                        )}
+                        {article.snippet && <p>{article.snippet}</p>}
+                      </a>
+                    ) : (
+                      <div>
+                        <strong>{article.source}</strong>
+                        {article.title && article.title !== article.source && (
+                          <span> - {article.title}</span>
+                        )}
+                        {article.snippet && <p>{article.snippet}</p>}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
             </section>
           )}
 
