@@ -21,23 +21,11 @@ const NewsCard = ({ item, children }) => {
         {item.publishedAt && <time>{new Date(item.publishedAt).toLocaleString()}</time>}
       </header>
       <p className="news-card__summary">{item.summary}</p>
-      {(storyHref || item.externalUrl || item.primaryLink) && (
-        <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          {storyHref && (
-            <Link href={storyHref} className="btn">
-              View In-Depth Analysis
-            </Link>
-          )}
-          {(item.externalUrl || item.primaryLink) && (
-            <a
-              href={item.externalUrl || item.primaryLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn secondary"
-            >
-              Read Original Article
-            </a>
-          )}
+      {storyHref && (
+        <div style={{ marginTop: '0.75rem' }}>
+          <Link href={storyHref} className="btn">
+            View In-Depth Analysis
+          </Link>
         </div>
       )}
       {children && <div className="news-card__actions">{children}</div>}

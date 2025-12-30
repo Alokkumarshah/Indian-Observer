@@ -43,7 +43,6 @@ export default function RootLayout({ children }) {
           </div>
 
           <div className="observer-nav-row">
-            <span className="observer-io-badge">IO+</span>
             <nav className="observer-nav-links">
               {navLinks.map((link) => (
                 <Link key={link.label} href={link.href}>

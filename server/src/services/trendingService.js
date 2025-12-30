@@ -9,13 +9,47 @@ const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models
 const SUMMARY_MIN_WORDS = 100;
 const SUMMARY_MAX_WORDS = 140;
 
-// Gemini rate limiting: ensure we stay well under 10 calls per minute
-const GEMINI_MIN_INTERVAL_MS = 12500; // ~8–9 requests per minute
-let lastGeminiCallAt = 0;
+// Gemini rate limiting: ensure we stay well under 10 calls per minute per key
+const GEMINI_MIN_INTERVAL_MS = 12500; // ~8–9 requests per minute per key
 
-const delayIfNeededForGemini = async () => {
+// Multiple API keys support for rate limit distribution
+const getApiKeys = () => {
+  const singleKey = process.env.GOOGLE_API_KEY;
+  const multipleKeys = process.env.GOOGLE_API_KEYS;
+  
+  if (multipleKeys) {
+    // Support comma-separated or space-separated keys
+    return multipleKeys.split(/[,\s]+/).map(k => k.trim()).filter(Boolean);
+  }
+  
+  if (singleKey) {
+    return [singleKey];
+  }
+  
+  return [];
+};
+
+const apiKeys = getApiKeys();
+let currentKeyIndex = 0;
+let lastGeminiCallAt = 0;
+const keyLastCallTimes = new Map(); // Track last call time per key
+
+// Get next available API key with round-robin
+const getNextApiKey = () => {
+  if (apiKeys.length === 0) {
+    throw new Error('No Google API keys configured');
+  }
+  
+  // Round-robin through keys
+  const key = apiKeys[currentKeyIndex];
+  currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
+  return key;
+};
+
+const delayIfNeededForGemini = async (apiKey) => {
   const now = Date.now();
-  const elapsed = now - lastGeminiCallAt;
+  const lastCall = keyLastCallTimes.get(apiKey) || 0;
+  const elapsed = now - lastCall;
 
   if (elapsed < GEMINI_MIN_INTERVAL_MS) {
     await new Promise((resolve) =>
@@ -23,7 +57,7 @@ const delayIfNeededForGemini = async () => {
     );
   }
 
-  lastGeminiCallAt = Date.now();
+  keyLastCallTimes.set(apiKey, Date.now());
 };
 
 const CATEGORY_FEEDS = [
@@ -225,13 +259,16 @@ const fetchCategoryArticles = async (feed, limit = 8) => {
     .filter((article) => Boolean(article.link));
 };
 
-const callGemini = async (prompt) => {
-  if (!process.env.GOOGLE_API_KEY) {
-    throw new Error('GOOGLE_API_KEY missing');
+const callGemini = async (prompt, enableGrounding = false, retryCount = 0) => {
+  if (apiKeys.length === 0) {
+    throw new Error('No Google API keys configured. Set GOOGLE_API_KEY or GOOGLE_API_KEYS');
   }
 
-  // Enforce global rate limit so we never exceed ~10 calls/min
-  await delayIfNeededForGemini();
+  // Get API key (round-robin)
+  const apiKey = getNextApiKey();
+  
+  // Enforce rate limit per key
+  await delayIfNeededForGemini(apiKey);
 
   // Check prompt length (Gemini 1.5 Flash supports up to ~1M tokens, but very long prompts may cause issues)
   const promptLength = prompt.length;
@@ -239,13 +276,35 @@ const callGemini = async (prompt) => {
     throw new Error(`Prompt too long: ${promptLength} characters (max ~1M tokens)`);
   }
 
+  // Build request payload
+  const requestPayload = {
+    contents: [{ parts: [{ text: prompt }] }]
+  };
+
+  // Add Google Search Grounding if enabled
+  if (enableGrounding) {
+    requestPayload.tools = [{
+      googleSearchRetrieval: {}
+    }];
+  }
+
   try {
     const { data } = await axios.post(
-      `${GEMINI_ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${process.env.GOOGLE_API_KEY}`,
-      { contents: [{ parts: [{ text: prompt }] }] }
+      `${GEMINI_ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+      requestPayload
     );
 
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+    const candidate = data?.candidates?.[0];
+    const text = candidate?.content?.parts?.[0]?.text?.trim() || '';
+    
+    // Extract grounding metadata if available
+    const groundingMetadata = candidate?.groundingMetadata || null;
+    
+    // Return both text and grounding metadata
+    return {
+      text,
+      groundingMetadata
+    };
   } catch (error) {
     // Log detailed error information for debugging
     if (error.response) {
@@ -254,11 +313,20 @@ const callGemini = async (prompt) => {
       const errorData = error.response.data;
       const errorMessage = errorData?.error?.message || errorData?.message || error.message;
       
+      // Handle rate limit errors (429) by trying next key
+      if (status === 429 && apiKeys.length > 1 && retryCount < apiKeys.length) {
+        console.warn(`Rate limit hit on API key, trying next key (attempt ${retryCount + 1}/${apiKeys.length})`);
+        // Wait a bit before retrying with next key
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return callGemini(prompt, enableGrounding, retryCount + 1);
+      }
+      
       console.error(`Gemini API error (${status}):`, {
         message: errorMessage,
         details: errorData?.error?.details || errorData,
         promptLength: promptLength,
-        model: GEMINI_MODEL
+        model: GEMINI_MODEL,
+        apiKeyIndex: currentKeyIndex - 1 < 0 ? apiKeys.length - 1 : currentKeyIndex - 1
       });
       
       // Throw a more descriptive error
@@ -289,8 +357,8 @@ const summarizeWithGemini = async (topic, trendData) => {
   ].join('\n');
 
   try {
-    const responseText = await callGemini(prompt);
-    return responseText || 'Summary unavailable.';
+    const response = await callGemini(prompt, false); // No grounding for summaries
+    return response.text || 'Summary unavailable.';
   } catch (error) {
     console.error('Gemini trend summary failed', error.message);
     return 'Summary unavailable.';
@@ -337,12 +405,13 @@ Link: ${article.link || 'N/A'}`;
     .join('\n\n');
 
   const prompt = [
-    'You are a professional news editor. Combine the following source material into a single, factual news write-up.',
+    'You are a professional news editor. Create an in-depth analysis by combining the following source material with real-time information from Google Search.',
     `Trending topic: ${topic}`,
-    'Use the sources below:',
+    'Use the sources provided below, and also search the web for the most current and accurate information:',
     articlesText,
     'Create JSON with this structure: {"title":"","content":"","summary":"","category":"","tags":["",""]}.',
-    'Content should be 4-6 paragraphs (300-500 words). Summary must be 2 sentences. Provide a relevant category and 3 tags.',
+    'Content should be 4-6 paragraphs (300-500 words) grounded in factual information. Summary must be 2 sentences. Provide a relevant category and 3 tags.',
+    'Cite sources when using information from web search.',
   ].join('\n\n');
 
   // Log prompt length for debugging
@@ -351,7 +420,33 @@ Link: ${article.link || 'N/A'}`;
   }
 
   try {
-    const responseText = await callGemini(prompt);
+    // Check if Google Grounding is enabled via environment variable
+    const enableGrounding = process.env.ENABLE_GOOGLE_GROUNDING === 'true' || process.env.ENABLE_GOOGLE_GROUNDING === '1';
+    
+    let response;
+    let responseText;
+    let groundingMetadata = null;
+    
+    if (enableGrounding) {
+      try {
+        response = await callGemini(prompt, true);
+        responseText = response.text;
+        groundingMetadata = response.groundingMetadata || null;
+      } catch (groundingError) {
+        // If grounding fails, fallback to non-grounded generation
+        console.warn('Google Grounding failed, falling back to non-grounded generation:', groundingError.message);
+        try {
+          response = await callGemini(prompt, false);
+          responseText = response.text;
+        } catch (fallbackError) {
+          throw fallbackError;
+        }
+      }
+    } else {
+      // Grounding disabled, use regular generation
+      response = await callGemini(prompt, false);
+      responseText = response.text;
+    }
     
     // Try to extract JSON from markdown code blocks first (```json ... ```)
     let jsonString = null;
@@ -397,12 +492,20 @@ Link: ${article.link || 'N/A'}`;
       throw new Error(`Invalid JSON from Gemini: ${parseError.message}`);
     }
     const normalizedSummary = normalizeSummaryLength(parsed.summary || parsed.content, articles);
+    
+    // Extract grounding citations if available
+    const groundingCitations = groundingMetadata?.groundingChunks?.map(chunk => ({
+      web: chunk.web?.uri || null,
+      title: chunk.web?.title || null,
+    })).filter(citation => citation.web) || [];
+    
     return {
       title: parsed.title || topic,
       content: parsed.content || parsed.summary || 'Content unavailable.',
       summary: normalizedSummary,
       category: parsed.category || 'General',
       tags: Array.isArray(parsed.tags) ? parsed.tags : [],
+      groundingCitations: groundingCitations.length > 0 ? groundingCitations : null,
     };
   } catch (error) {
     console.error('Gemini article synthesis failed:', error.message);
@@ -482,6 +585,7 @@ const ingestCategoryFeeds = async (issues) => {
             existingRecord.primaryLink = article.link;
             existingRecord.externalUrl = article.link;
             existingRecord.imageUrl = article.imageUrl || null;
+            existingRecord.groundingCitations = articleData.groundingCitations || null;
             existingRecord.generatedAt = new Date();
             existingRecord.status = 'published';
             existingRecord.publishedAt = new Date();
@@ -506,6 +610,7 @@ const ingestCategoryFeeds = async (issues) => {
             primaryLink: article.link,
             externalUrl: article.link,
             imageUrl: article.imageUrl || null,
+            groundingCitations: articleData.groundingCitations || null,
             generatedAt: new Date(),
             isTrending: false,
             autoGenerated: true,
@@ -624,6 +729,7 @@ const runTrendingIngestion = async () => {
             primaryLink: firstArticle.link || null,
             externalUrl: firstArticle.link || null,
             imageUrl: firstArticle.imageUrl || null,
+            groundingCitations: articleData?.groundingCitations || null,
             autoGenerated: true,
             fromNewsApi: true,
             status: 'published',
@@ -749,6 +855,7 @@ const generateNewsFromTopic = async ({ topic, autoPublish = false, authorId = nu
     existingNews.primaryLink = firstArticle.link || null;
     existingNews.externalUrl = firstArticle.link || null;
     existingNews.imageUrl = firstArticle.imageUrl || null;
+    existingNews.groundingCitations = articleData.groundingCitations || null;
     existingNews.generatedAt = new Date();
     if (autoPublish) {
       existingNews.status = 'published';
@@ -773,6 +880,7 @@ const generateNewsFromTopic = async ({ topic, autoPublish = false, authorId = nu
     primaryLink: firstArticle.link || null,
     externalUrl: firstArticle.link || null,
     imageUrl: firstArticle.imageUrl || null,
+    groundingCitations: articleData.groundingCitations || null,
     status: autoPublish ? 'published' : 'draft',
     publishedAt: autoPublish ? new Date() : null,
     isTrending: false,

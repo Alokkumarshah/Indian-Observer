@@ -2,10 +2,18 @@ const News = require('../models/News');
 const { generateNewsFromTopic } = require('../services/trendingService');
 
 const getPublishedNews = async (req, res) => {
-  const news = await News.find({ status: 'published' })
-    .sort({ publishedAt: -1, generatedAt: -1, createdAt: -1 })
-    .populate('comments.user', 'name role');
-  res.json(news);
+  try {
+    const news = await News.find({ status: 'published' })
+      .sort({ publishedAt: -1, generatedAt: -1, createdAt: -1 })
+      .populate('comments.user', 'name role')
+      .lean();
+    
+    console.log(`[getPublishedNews] Found ${news.length} published articles`);
+    res.json(news);
+  } catch (error) {
+    console.error('[getPublishedNews] Error:', error);
+    res.status(500).json({ message: 'Failed to fetch published news', error: error.message });
+  }
 };
 
 const getDraftNews = async (req, res) => {

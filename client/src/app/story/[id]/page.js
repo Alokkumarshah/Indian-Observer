@@ -15,17 +15,6 @@ const formatDate = (value) => {
   }
 };
 
-const buildRelatedArticles = (options = []) =>
-  options.map((option, index) => ({
-    id: `${option.link || option.title || 'source'}-${index}`,
-    title: option.title || option.source || 'Source coverage',
-    snippet: option.snippet || 'Source snippet unavailable.',
-    source: option.source || 'Unknown outlet',
-    link: option.link || option.news_url || null,
-    imageUrl: option.imageUrl || null,
-    publishedAt: option.publishedAt || null,
-  }));
-
 export default function StoryDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -72,11 +61,6 @@ export default function StoryDetailPage() {
       cancelled = true;
     };
   }, [storyId]);
-
-  const relatedArticles = useMemo(
-    () => buildRelatedArticles(story?.sourceOptions),
-    [story?.sourceOptions]
-  );
 
   const briefs = useMemo(() => {
     if (allNews.length === 0) return [];
@@ -194,19 +178,6 @@ export default function StoryDetailPage() {
           <h2>Observer Summary</h2>
           <p className="story-detail__summary">{story.summary}</p>
 
-          {(story.externalUrl || story.primaryLink) && (
-            <div style={{ marginTop: '1rem', marginBottom: '1rem' }}>
-              <a
-                href={story.externalUrl || story.primaryLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="btn"
-              >
-                Read Original Article
-              </a>
-            </div>
-          )}
-
           {story.content && (
             <section className="story-detail__analysis" id="in-depth-analysis">
               <h3>In-depth Analysis</h3>
@@ -222,39 +193,6 @@ export default function StoryDetailPage() {
             </section>
           )}
 
-          {relatedArticles.length > 0 && (
-            <section className="story-detail__sources">
-              <h3>Source Articles</h3>
-              <ul className="story-detail__source-list">
-                {relatedArticles.map((article) => (
-                  <li key={article.id}>
-                    {article.link ? (
-                      <a
-                        href={article.link}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="story-detail__source-link"
-                      >
-                        <strong>{article.source}</strong>
-                        {article.title && article.title !== article.source && (
-                          <span> - {article.title}</span>
-                        )}
-                        {article.snippet && <p>{article.snippet}</p>}
-                      </a>
-                    ) : (
-                      <div>
-                        <strong>{article.source}</strong>
-                        {article.title && article.title !== article.source && (
-                          <span> - {article.title}</span>
-                        )}
-                        {article.snippet && <p>{article.snippet}</p>}
-                      </div>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
 
           {relatedNews.length > 0 && (
             <section className="story-detail__related">

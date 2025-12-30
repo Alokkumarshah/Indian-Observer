@@ -169,23 +169,39 @@ export default function Home() {
   const [visibleCount, setVisibleCount] = useState(6);
 
   const loadNews = async () => {
-    const [{ data: published }, { data: trending }, statusResponse] = await Promise.all([
-      getPublishedNews(),
-      getTrendingNews(),
-      getTrendingStatus().catch(() => ({ data: null })),
-    ]);
-    
-    // Deduplicate by _id to prevent duplicate rendering
-    const uniquePublished = Array.from(
-      new Map(published?.map((item) => [item._id, item]) || []).values()
-    );
-    const uniqueTrending = Array.from(
-      new Map(trending?.map((item) => [item._id, item]) || []).values()
-    );
-    
-    setItems(uniquePublished);
-    setTrendingItems(uniqueTrending);
-    setIngestionStatus(statusResponse?.data || null);
+    try {
+      const [{ data: published }, { data: trending }, statusResponse] = await Promise.all([
+        getPublishedNews().catch((err) => {
+          console.error('Failed to fetch published news:', err);
+          return { data: [] };
+        }),
+        getTrendingNews().catch((err) => {
+          console.error('Failed to fetch trending news:', err);
+          return { data: [] };
+        }),
+        getTrendingStatus().catch(() => ({ data: null })),
+      ]);
+      
+      console.log('Fetched published:', published?.length || 0);
+      console.log('Fetched trending:', trending?.length || 0);
+      
+      // Deduplicate by _id to prevent duplicate rendering
+      const uniquePublished = Array.from(
+        new Map(published?.map((item) => [item._id, item]) || []).values()
+      );
+      const uniqueTrending = Array.from(
+        new Map(trending?.map((item) => [item._id, item]) || []).values()
+      );
+      
+      setItems(uniquePublished);
+      setTrendingItems(uniqueTrending);
+      setIngestionStatus(statusResponse?.data || null);
+    } catch (error) {
+      console.error('Failed to load news:', error);
+      console.error('Error details:', error.response?.data || error.message);
+      setItems([]);
+      setTrendingItems([]);
+    }
   };
 
   useEffect(() => {
@@ -336,23 +352,11 @@ export default function Home() {
     return (
       <ul className="observer-source-list">
         {story.sourceOptions.slice(0, 3).map((option, idx) => {
-          const sourceLink = option.link || option.news_url || null;
           const sourceName = option.source || 'Source';
           
           return (
             <li key={`${story.topic || story.title || 'story'}-${idx}`}>
-              {sourceLink ? (
-                <a
-                  href={sourceLink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="observer-source-link"
-                >
-                  <span>{sourceName}</span>
-                </a>
-              ) : (
-                <span>{sourceName}</span>
-              )}
+              <span>{sourceName}</span>
               {option.snippet && <small>{option.snippet}</small>}
             </li>
           );
@@ -528,7 +532,7 @@ export default function Home() {
           )}
         </div>
 
-        {timelineSource.length > visibleCount && (
+        {filteredStories.length > visibleCount && (
           <button type="button" className="btn observer-load-more" onClick={handleLoadMore}>
             Load more stories
           </button>
@@ -567,38 +571,26 @@ export default function Home() {
         <div className="observer-trending">
           {trendingFeed.length > 0 ? (
             trendingFeed.map((trend, idx) => {
-              const externalUrl = trend.externalUrl || trend.primaryLink;
-              const storyUrl = trend._id ? `/story/${trend._id}` : null;
-              
-              const content = (
-                <>
-                  <header>
-                    <span>Trend #{String(idx + 1).padStart(2, '0')}</span>
-                    <time>{getTimestamp(trend)}</time>
-                  </header>
-                  <h3>{trend.title || trend.topic}</h3>
-                  <p>{trend.summary}</p>
-                  {renderSourceList(trend)}
-                  <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                    {storyUrl && (
-                      <Link href={storyUrl} className="btn" onClick={(e) => e.stopPropagation()}>
-                        View In-Depth Analysis
-                      </Link>
-                    )}
-                    {externalUrl && (
-                      <a
-                        href={externalUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn secondary"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        Read Original
-                      </a>
-                    )}
+            const storyUrl = trend._id ? `/story/${trend._id}` : null;
+            
+            const content = (
+              <>
+                <header>
+                  <span>Trend #{String(idx + 1).padStart(2, '0')}</span>
+                  <time>{getTimestamp(trend)}</time>
+                </header>
+                <h3>{trend.title || trend.topic}</h3>
+                <p>{trend.summary}</p>
+                {renderSourceList(trend)}
+                {storyUrl && (
+                  <div style={{ marginTop: '1rem' }}>
+                    <Link href={storyUrl} className="btn" onClick={(e) => e.stopPropagation()}>
+                      View In-Depth Analysis
+                    </Link>
                   </div>
-                </>
-              );
+                )}
+              </>
+            );
 
               return (
                 <article key={trend._id || `trend-${idx}`} className="observer-trending__card">

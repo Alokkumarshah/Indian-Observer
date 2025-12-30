@@ -13,9 +13,17 @@ const forceRefreshTrending = async (req, res) => {
 };
 
 const listTrending = async (req, res) => {
-  const news = await News.find({ isTrending: true })
-    .sort({ generatedAt: -1, publishedAt: -1, createdAt: -1 });
-  res.json(news);
+  try {
+    const news = await News.find({ isTrending: true })
+      .sort({ generatedAt: -1, publishedAt: -1, createdAt: -1 })
+      .lean();
+    
+    console.log(`[listTrending] Found ${news.length} trending articles`);
+    res.json(news);
+  } catch (error) {
+    console.error('[listTrending] Error:', error);
+    res.status(500).json({ message: 'Failed to fetch trending news', error: error.message });
+  }
 };
 
 const getTrendingStatus = async (req, res) => {

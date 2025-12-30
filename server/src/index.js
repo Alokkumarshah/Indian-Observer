@@ -12,12 +12,17 @@ dotenv.config();
 
 const app = express();
 
-const REQUIRED_ENV_VARS = ['JWT_SECRET', 'SERPAPI_KEY', 'GOOGLE_API_KEY'];
+const REQUIRED_ENV_VARS = ['JWT_SECRET', 'SERPAPI_KEY'];
 
 const validateEnv = () => {
   const missing = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
   if (missing.length) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+  
+  // Check for Google API key (either single or multiple)
+  if (!process.env.GOOGLE_API_KEY && !process.env.GOOGLE_API_KEYS) {
+    throw new Error('Missing required environment variable: GOOGLE_API_KEY or GOOGLE_API_KEYS');
   }
 };
 validateEnv();

@@ -36,6 +36,7 @@ const newsSchema = new mongoose.Schema(
     primaryLink: { type: String, default: null },
     imageUrl: { type: String, default: null },
     externalUrl: { type: String, default: null },
+    groundingCitations: { type: mongoose.Schema.Types.Mixed, default: null },
     status: {
       type: String,
       enum: ['draft', 'published'],
