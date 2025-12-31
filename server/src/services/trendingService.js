@@ -6,8 +6,11 @@ const SystemStatus = require('../models/SystemStatus');
 
 const GEMINI_MODEL = 'gemini-robotics-er-1.5-preview';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
-const SUMMARY_MIN_WORDS = 100;
-const SUMMARY_MAX_WORDS = 140;
+const SUMMARY_MIN_WORDS = 500;
+const SUMMARY_MAX_WORDS = 1000;
+
+// Home page refresh delay: only generate new articles after 5 hours
+const HOME_PAGE_REFRESH_DELAY_MS = 10000; // 5 hours in milliseconds
 
 // Gemini rate limiting: ensure we stay well under 10 calls per minute per key
 const GEMINI_MIN_INTERVAL_MS = 12500; // ~8–9 requests per minute per key
@@ -29,15 +32,21 @@ const getApiKeys = () => {
   return [];
 };
 
-const apiKeys = getApiKeys();
+// Lazy initialization: get keys when needed (after dotenv.config() has run)
+let apiKeys = null;
 let currentKeyIndex = 0;
 let lastGeminiCallAt = 0;
 const keyLastCallTimes = new Map(); // Track last call time per key
 
 // Get next available API key with round-robin
 const getNextApiKey = () => {
+  // Lazy load API keys if not already loaded
+  if (apiKeys === null) {
+    apiKeys = getApiKeys();
+  }
+  
   if (apiKeys.length === 0) {
-    throw new Error('No Google API keys configured');
+    throw new Error('No Google API keys configured. Set GOOGLE_API_KEY or GOOGLE_API_KEYS');
   }
   
   // Round-robin through keys
@@ -110,6 +119,38 @@ const updateStatus = async (changes) => {
   } catch (error) {
     console.error('Failed to persist ingestion status', error.message);
   }
+};
+
+// Helper function to validate if article content and summary are successfully generated
+const isValidArticleContent = (content, summary) => {
+  if (!content || !summary) {
+    return false;
+  }
+  
+  const invalidContentPatterns = [
+    'article not generated',
+    'content unavailable',
+    'analysis unavailable',
+    'summary unavailable',
+    'not generated',
+    'unavailable'
+  ];
+  
+  const contentLower = content.toLowerCase().trim();
+  const summaryLower = summary.toLowerCase().trim();
+  
+  // Check if content or summary matches any invalid pattern
+  const hasInvalidContent = invalidContentPatterns.some(pattern => 
+    contentLower.includes(pattern)
+  );
+  const hasInvalidSummary = invalidContentPatterns.some(pattern => 
+    summaryLower.includes(pattern)
+  );
+  
+  // Both must be valid (not matching invalid patterns) and have minimum length
+  return !hasInvalidContent && !hasInvalidSummary && 
+         content.trim().length > 50 && 
+         summary.trim().length > 20;
 };
 
 const normalizeSummaryLength = (text, articleOptions = []) => {
@@ -260,6 +301,11 @@ const fetchCategoryArticles = async (feed, limit = 8) => {
 };
 
 const callGemini = async (prompt, enableGrounding = false, retryCount = 0) => {
+  // Lazy load API keys if not already loaded
+  if (apiKeys === null) {
+    apiKeys = getApiKeys();
+  }
+  
   if (apiKeys.length === 0) {
     throw new Error('No Google API keys configured. Set GOOGLE_API_KEY or GOOGLE_API_KEYS');
   }
@@ -284,7 +330,7 @@ const callGemini = async (prompt, enableGrounding = false, retryCount = 0) => {
   // Add Google Search Grounding if enabled
   if (enableGrounding) {
     requestPayload.tools = [{
-      googleSearchRetrieval: {}
+      google_search: {}
     }];
   }
 
@@ -314,6 +360,10 @@ const callGemini = async (prompt, enableGrounding = false, retryCount = 0) => {
       const errorMessage = errorData?.error?.message || errorData?.message || error.message;
       
       // Handle rate limit errors (429) by trying next key
+      // Ensure apiKeys is loaded
+      if (apiKeys === null) {
+        apiKeys = getApiKeys();
+      }
       if (status === 429 && apiKeys.length > 1 && retryCount < apiKeys.length) {
         console.warn(`Rate limit hit on API key, trying next key (attempt ${retryCount + 1}/${apiKeys.length})`);
         // Wait a bit before retrying with next key
@@ -326,7 +376,7 @@ const callGemini = async (prompt, enableGrounding = false, retryCount = 0) => {
         details: errorData?.error?.details || errorData,
         promptLength: promptLength,
         model: GEMINI_MODEL,
-        apiKeyIndex: currentKeyIndex - 1 < 0 ? apiKeys.length - 1 : currentKeyIndex - 1
+        apiKeyIndex: currentKeyIndex - 1 < 0 ? (apiKeys.length > 0 ? apiKeys.length - 1 : 0) : currentKeyIndex - 1
       });
       
       // Throw a more descriptive error
@@ -546,6 +596,17 @@ const ingestCategoryFeeds = async (issues) => {
           // Generate analysis specific to this individual article
           const articleData = await summarizeArticlesWithGemini(article.title, [article]);
           
+          // Validate that both content and summary are successfully generated
+          const finalContent = articleData.content || article.snippet || 'Analysis unavailable.';
+          const finalSummary = articleData.summary || normalizeSummaryLength(article.snippet, [article]);
+          
+          if (!isValidArticleContent(finalContent, finalSummary)) {
+            const errorMsg = `Article generation incomplete for "${article.title}" - content or summary not properly generated. Skipping save.`;
+            console.warn(`[Category Feed] ${errorMsg}`);
+            issues.push(errorMsg);
+            continue; // Skip this article and wait for next generation cycle
+          }
+          
           // Use primaryLink as the GLOBAL unique identifier to prevent duplicates across all categories
           // Normalize the link to handle URL variations (trailing slashes, query params, etc.)
           const normalizedLink = article.link?.split('?')[0]?.replace(/\/$/, '');
@@ -571,11 +632,11 @@ const ingestCategoryFeeds = async (issues) => {
               existingCategories.push(newCategory);
             }
             
-            // Update the existing record with latest data
+            // Update the existing record with latest data (only if valid)
             existingRecord.topic = article.title;
             existingRecord.title = articleData.title || article.title;
-            existingRecord.summary = articleData.summary || normalizeSummaryLength(article.snippet, [article]);
-            existingRecord.content = articleData.content || article.snippet || 'Analysis unavailable.';
+            existingRecord.summary = finalSummary;
+            existingRecord.content = finalContent;
             existingRecord.category = newCategory; // Use the most recent category
             existingRecord.tags = articleData.tags.length ? articleData.tags : feed.tags;
             existingRecord.sourceOptions = [article];
@@ -595,12 +656,12 @@ const ingestCategoryFeeds = async (issues) => {
             continue; // Skip creating a new record
           }
           
-          // Article doesn't exist - create new record
+          // Article doesn't exist - create new record (content and summary already validated above)
           const record = await News.create({
             topic: article.title,
             title: articleData.title || article.title,
-            summary: articleData.summary || normalizeSummaryLength(article.snippet, [article]),
-            content: articleData.content || article.snippet || 'Analysis unavailable.',
+            summary: finalSummary,
+            content: finalContent,
             category: feed.category,
             tags: articleData.tags.length ? articleData.tags : feed.tags,
             sourceOptions: [article],
@@ -638,6 +699,31 @@ const ingestCategoryFeeds = async (issues) => {
 };
 
 const refreshCategoryFeeds = async () => {
+  // Check if 5 hours have passed since last refresh
+  const status = await SystemStatus.findOne({ key: INGESTION_STATUS_KEY });
+  const now = new Date();
+  
+  if (status?.lastRunFinishedAt) {
+    const timeSinceLastRefresh = now.getTime() - status.lastRunFinishedAt.getTime();
+    
+    if (timeSinceLastRefresh < HOME_PAGE_REFRESH_DELAY_MS) {
+      const hoursRemaining = ((HOME_PAGE_REFRESH_DELAY_MS - timeSinceLastRefresh) / (60 * 60 * 1000)).toFixed(2);
+      console.log(`[Refresh] Skipping refresh - only ${hoursRemaining} hours since last refresh (5 hour delay required)`);
+      
+      // Return existing published articles from MongoDB instead of generating new ones
+      const existingArticles = await News.find({ 
+        status: 'published',
+        autoGenerated: true,
+        fromNewsApi: true
+      }).sort({ publishedAt: -1, generatedAt: -1 });
+      
+      return existingArticles;
+    }
+  }
+
+  // 5 hours have passed or no previous refresh - proceed with generating new articles
+  console.log(`[Refresh] Proceeding with refresh - ${status?.lastRunFinishedAt ? '5+ hours since last refresh' : 'no previous refresh found'}`);
+  
   const issues = [];
   const categoryRecords = await ingestCategoryFeeds(issues);
 
@@ -708,6 +794,14 @@ const runTrendingIngestion = async () => {
         articleData?.summary || summary || finalContent,
         articles
       );
+
+      // Validate that both content and summary are successfully generated
+      if (!isValidArticleContent(finalContent, normalizedSummary)) {
+        const errorMsg = `Article generation incomplete for topic "${topic}" - content or summary not properly generated. Skipping save.`;
+        console.warn(`[Trending] ${errorMsg}`);
+        issues.push(errorMsg);
+        continue; // Skip this topic and wait for next generation cycle
+      }
 
       const record = await News.findOneAndUpdate(
         { topic },
@@ -830,6 +924,14 @@ const generateNewsFromTopic = async ({ topic, autoPublish = false, authorId = nu
   );
   const firstArticle = articles[0];
 
+  // Validate that both content and summary are successfully generated
+  const finalContent = articleData.content || articles[0]?.snippet || 'Analysis unavailable.';
+  const finalSummary = articleData.summary || normalizeSummaryLength(articles[0]?.snippet, articles);
+  
+  if (!isValidArticleContent(finalContent, finalSummary)) {
+    throw new Error('Article generation incomplete - content or summary not properly generated. Please try again.');
+  }
+
   // Check for existing article by topic or primaryLink to prevent duplicates
   const existingNews = await News.findOne({
     $or: [
@@ -841,10 +943,10 @@ const generateNewsFromTopic = async ({ topic, autoPublish = false, authorId = nu
   });
 
   if (existingNews) {
-    // Update existing record instead of creating duplicate
+    // Update existing record instead of creating duplicate (content and summary already validated above)
     existingNews.title = articleData.title || topic;
-    existingNews.summary = articleData.summary || normalizeSummaryLength(articles[0]?.snippet, articles);
-    existingNews.content = articleData.content;
+    existingNews.summary = finalSummary;
+    existingNews.content = finalContent;
     existingNews.category = articleData.category;
     existingNews.tags = articleData.tags;
     existingNews.interestOverTime = insights?.interest_over_time || [];
@@ -868,8 +970,8 @@ const generateNewsFromTopic = async ({ topic, autoPublish = false, authorId = nu
   const record = await News.create({
     topic,
     title: articleData.title || topic,
-    summary: articleData.summary || normalizeSummaryLength(articles[0]?.snippet, articles),
-    content: articleData.content,
+    summary: finalSummary,
+    content: finalContent,
     category: articleData.category,
     tags: articleData.tags,
     interestOverTime: insights?.interest_over_time || [],
